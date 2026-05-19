@@ -25,6 +25,7 @@ class Master_Auto_Catalog_Admin
         add_submenu_page(self::MENU_SLUG, 'Индексация Google', 'Индексация Google', 'manage_options', 'vin-google-index', [__CLASS__, 'google_page']);
         add_submenu_page(self::MENU_SLUG, 'Heleket', 'Heleket', 'manage_options', 'heleket-settings', [__CLASS__, 'heleket_page']);
         add_submenu_page(self::MENU_SLUG, 'CryptoCloud', 'CryptoCloud', 'manage_options', 'cryptocloud-settings', [__CLASS__, 'cryptocloud_page']);
+        add_submenu_page(self::MENU_SLUG, 'Updates', 'Updates', 'manage_options', 'mac-updates', [__CLASS__, 'updates_page']);
 
         add_submenu_page(null, 'Google logs', 'Google logs', 'manage_options', 'gai-logs', [__CLASS__, 'google_page']);
         add_submenu_page(null, 'VIN import', 'VIN import', 'manage_options', 'vin-fallback-search', [__CLASS__, 'vin_settings_page']);
@@ -240,6 +241,87 @@ class Master_Auto_Catalog_Admin
             'reCAPTCHA Site Key и Secret Key нужны только если включаете защиту от ботов.',
             'Shortcode кнопки: [cryptocloud_button amount="40" text="Hide car"].',
             'Shortcode страницы успешной оплаты: [cryptocloud_success].',
+        ]);
+    }
+
+    public static function updates_page()
+    {
+        self::section_header('Updates', 'GitHub Releases updater for this master plugin.');
+
+        if (isset($_GET['mac_saved'])) {
+            echo '<div class="wrap mac-wrap"><div class="notice notice-success is-dismissible"><p>Settings saved.</p></div></div>';
+        }
+
+        if (isset($_GET['mac_checked'])) {
+            echo '<div class="wrap mac-wrap"><div class="notice notice-success is-dismissible"><p>Update check cache was refreshed.</p></div></div>';
+        }
+
+        $release = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_latest_release(false) : false;
+        $current_version = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::current_version() : '0.0.0';
+        $latest_version = $release && !empty($release['version']) ? $release['version'] : 'No release found';
+        $has_update = $release && !empty($release['version']) && version_compare($release['version'], $current_version, '>');
+        $secret = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_secret() : '';
+        $webhook_url = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::webhook_url() : '';
+        ?>
+        <div class="wrap mac-wrap">
+            <div class="mac-update-panel">
+                <table class="widefat striped mac-update-table">
+                    <tbody>
+                    <tr>
+                        <th>Current version</th>
+                        <td><code><?php echo esc_html($current_version); ?></code></td>
+                    </tr>
+                    <tr>
+                        <th>Latest GitHub release</th>
+                        <td>
+                            <code><?php echo esc_html($latest_version); ?></code>
+                            <?php if ($has_update) : ?>
+                                <span class="mac-badge mac-badge-warn">Update available</span>
+                            <?php else : ?>
+                                <span class="mac-badge mac-badge-good">Up to date</span>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Repository</th>
+                        <td><a href="<?php echo esc_url(Master_Auto_Catalog_Updater::repo_url()); ?>" target="_blank" rel="noopener"><?php echo esc_html(Master_Auto_Catalog_Updater::repo_url()); ?></a></td>
+                    </tr>
+                    <tr>
+                        <th>Webhook URL</th>
+                        <td><code><?php echo esc_html($webhook_url); ?></code></td>
+                    </tr>
+                    <?php if ($release && !empty($release['html_url'])) : ?>
+                        <tr>
+                            <th>Release page</th>
+                            <td><a href="<?php echo esc_url($release['html_url']); ?>" target="_blank" rel="noopener"><?php echo esc_html($release['html_url']); ?></a></td>
+                        </tr>
+                    <?php endif; ?>
+                    </tbody>
+                </table>
+
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mac-update-form">
+                    <?php wp_nonce_field('mac_save_update_settings'); ?>
+                    <input type="hidden" name="action" value="mac_save_update_settings">
+                    <h2>Webhook secret</h2>
+                    <p>Use the same secret in GitHub webhook settings. Keep it long and private.</p>
+                    <input type="text" name="mac_github_webhook_secret" value="<?php echo esc_attr($secret); ?>" class="regular-text" autocomplete="off">
+                    <?php submit_button('Save settings'); ?>
+                </form>
+
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <?php wp_nonce_field('mac_force_update_check'); ?>
+                    <input type="hidden" name="action" value="mac_force_update_check">
+                    <?php submit_button('Check GitHub release now', 'secondary'); ?>
+                </form>
+            </div>
+        </div>
+        <?php
+
+        self::help_block('GitHub release workflow', [
+            'Change Version in master-auto-catalog.php before each release.',
+            'Commit and push the code to GitHub.',
+            'Create a GitHub release with a tag like v1.0.1.',
+            'GitHub sends the release webhook to this site, and WordPress sees the update.',
         ]);
     }
 

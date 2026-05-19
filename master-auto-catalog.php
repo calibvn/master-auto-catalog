@@ -12,8 +12,12 @@ define('MAC_MASTER_ACTIVE', true);
 define('MAC_PLUGIN_FILE', __FILE__);
 define('MAC_PLUGIN_PATH', plugin_dir_path(__FILE__));
 define('MAC_PLUGIN_URL', plugin_dir_url(__FILE__));
+define('MAC_PLUGIN_BASENAME', plugin_basename(__FILE__));
+define('MAC_GITHUB_OWNER', 'calibvn');
+define('MAC_GITHUB_REPO', 'master-auto-catalog');
 
 require_once MAC_PLUGIN_PATH . 'includes/class-master-auto-catalog-admin.php';
+require_once MAC_PLUGIN_PATH . 'includes/class-master-auto-catalog-updater.php';
 
 function mac_load_modules()
 {
@@ -37,6 +41,7 @@ function mac_load_modules()
 add_action('plugins_loaded', 'mac_load_modules', 1);
 add_action('admin_menu', ['Master_Auto_Catalog_Admin', 'register_menu'], 20);
 add_action('admin_enqueue_scripts', ['Master_Auto_Catalog_Admin', 'enqueue_admin_assets']);
+add_action('init', ['Master_Auto_Catalog_Updater', 'init']);
 
 register_activation_hook(__FILE__, 'mac_activate');
 register_deactivation_hook(__FILE__, 'mac_deactivate');
