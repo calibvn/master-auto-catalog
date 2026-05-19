@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.10
+ * Version: 1.0.11
  * Author: AskarTech
  */
 
