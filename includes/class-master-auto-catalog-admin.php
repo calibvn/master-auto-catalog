@@ -256,12 +256,17 @@ class Master_Auto_Catalog_Admin
             echo '<div class="wrap mac-wrap"><div class="notice notice-success is-dismissible"><p>Update check cache was refreshed.</p></div></div>';
         }
 
+        if (isset($_GET['mac_installed'])) {
+            echo '<div class="wrap mac-wrap"><div class="notice notice-success is-dismissible"><p>Update installer finished. Check the status below.</p></div></div>';
+        }
+
         $release = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_latest_release(false) : false;
         $current_version = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::current_version() : '0.0.0';
         $latest_version = $release && !empty($release['version']) ? $release['version'] : 'No release found';
         $has_update = $release && !empty($release['version']) && version_compare($release['version'], $current_version, '>');
         $secret = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_secret() : '';
         $webhook_url = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::webhook_url() : '';
+        $last_update = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_last_auto_update() : [];
         ?>
         <div class="wrap mac-wrap">
             <div class="mac-update-panel">
@@ -290,6 +295,21 @@ class Master_Auto_Catalog_Admin
                         <th>Webhook URL</th>
                         <td><code><?php echo esc_html($webhook_url); ?></code></td>
                     </tr>
+                    <tr>
+                        <th>Last auto-update</th>
+                        <td>
+                            <?php if ($last_update) : ?>
+                                <span class="mac-badge mac-badge-<?php echo esc_attr($last_update['status'] === 'success' ? 'good' : 'warn'); ?>"><?php echo esc_html($last_update['status']); ?></span>
+                                <code><?php echo esc_html($last_update['time'] ?? ''); ?></code>
+                                <?php if (!empty($last_update['version'])) : ?>
+                                    <code><?php echo esc_html($last_update['version']); ?></code>
+                                <?php endif; ?>
+                                <p><?php echo esc_html($last_update['message'] ?? ''); ?></p>
+                            <?php else : ?>
+                                No update has been installed by webhook yet.
+                            <?php endif; ?>
+                        </td>
+                    </tr>
                     <?php if ($release && !empty($release['html_url'])) : ?>
                         <tr>
                             <th>Release page</th>
@@ -313,6 +333,14 @@ class Master_Auto_Catalog_Admin
                     <input type="hidden" name="action" value="mac_force_update_check">
                     <?php submit_button('Check GitHub release now', 'secondary'); ?>
                 </form>
+
+                <?php if ($has_update) : ?>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <?php wp_nonce_field('mac_install_update'); ?>
+                        <input type="hidden" name="action" value="mac_install_update">
+                        <?php submit_button('Install update now', 'primary'); ?>
+                    </form>
+                <?php endif; ?>
             </div>
         </div>
         <?php
@@ -320,8 +348,8 @@ class Master_Auto_Catalog_Admin
         self::help_block('GitHub release workflow', [
             'Change Version in master-auto-catalog.php before each release.',
             'Commit and push the code to GitHub.',
-            'Create a GitHub release with a tag like v1.0.1.',
-            'GitHub sends the release webhook to this site, and WordPress sees the update.',
+            'GitHub Actions creates a release with a tag like v1.0.2.',
+            'GitHub sends the release webhook to this site, and the plugin installs the update automatically.',
         ]);
     }
 

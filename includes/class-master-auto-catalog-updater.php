@@ -5,6 +5,7 @@ defined('ABSPATH') || exit;
 class Master_Auto_Catalog_Updater
 {
     const OPTION_SECRET = 'mac_github_webhook_secret';
+    const OPTION_LAST_AUTO_UPDATE = 'mac_github_last_auto_update';
     const TRANSIENT_RELEASE = 'mac_github_latest_release';
     const TRANSIENT_TIMEOUT = 6 * HOUR_IN_SECONDS;
 
@@ -16,6 +17,7 @@ class Master_Auto_Catalog_Updater
         add_action('rest_api_init', [__CLASS__, 'register_routes']);
         add_action('admin_post_mac_save_update_settings', [__CLASS__, 'save_settings']);
         add_action('admin_post_mac_force_update_check', [__CLASS__, 'force_update_check']);
+        add_action('admin_post_mac_install_update', [__CLASS__, 'install_update_from_admin']);
     }
 
     public static function current_version()
@@ -36,6 +38,12 @@ class Master_Auto_Catalog_Updater
     public static function get_secret()
     {
         return (string) get_option(self::OPTION_SECRET, '');
+    }
+
+    public static function get_last_auto_update()
+    {
+        $data = get_option(self::OPTION_LAST_AUTO_UPDATE, []);
+        return is_array($data) ? $data : [];
     }
 
     public static function check_for_update($transient)
@@ -146,12 +154,14 @@ class Master_Auto_Catalog_Updater
         $payload = json_decode($body, true);
         $action = is_array($payload) && isset($payload['action']) ? sanitize_key($payload['action']) : '';
 
-        if ($event === 'release' && in_array($action, ['published', 'released', 'edited'], true)) {
+        $auto_update = null;
+        if ($event === 'release' && in_array($action, ['published', 'released'], true)) {
             self::clear_cache();
-            self::get_latest_release(true);
+            $release = self::get_latest_release(true);
+            $auto_update = self::install_available_update($release, 'github_webhook');
         }
 
-        return new WP_REST_Response(['ok' => true], 200);
+        return new WP_REST_Response(['ok' => true, 'auto_update' => $auto_update], 200);
     }
 
     public static function save_settings()
@@ -181,6 +191,71 @@ class Master_Auto_Catalog_Updater
 
         wp_safe_redirect(add_query_arg(['page' => 'mac-updates', 'mac_checked' => '1'], admin_url('admin.php')));
         exit;
+    }
+
+    public static function install_update_from_admin()
+    {
+        if (!current_user_can('update_plugins')) {
+            wp_die('Access denied.');
+        }
+
+        check_admin_referer('mac_install_update');
+        self::clear_cache();
+        $release = self::get_latest_release(true);
+        self::install_available_update($release, 'admin_button');
+        wp_clean_update_cache();
+
+        wp_safe_redirect(add_query_arg(['page' => 'mac-updates', 'mac_installed' => '1'], admin_url('admin.php')));
+        exit;
+    }
+
+    public static function install_available_update($release = null, $source = 'manual')
+    {
+        if (!$release) {
+            $release = self::get_latest_release(true);
+        }
+
+        if (!$release || empty($release['version']) || empty($release['package'])) {
+            return self::record_auto_update('error', 'No GitHub release package was found.', $source, '');
+        }
+
+        $target_version = (string) $release['version'];
+        $current_version = self::current_version();
+        if (!version_compare($target_version, $current_version, '>')) {
+            return self::record_auto_update('skipped', 'No newer version is available.', $source, $target_version);
+        }
+
+        if (!function_exists('request_filesystem_credentials')) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+        }
+        if (!function_exists('get_plugins')) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+        if (!class_exists('Plugin_Upgrader')) {
+            require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+        }
+        if (!function_exists('wp_update_plugins')) {
+            require_once ABSPATH . 'wp-includes/update.php';
+        }
+
+        self::clear_cache();
+        wp_update_plugins();
+
+        $skin = new Automatic_Upgrader_Skin();
+        $upgrader = new Plugin_Upgrader($skin);
+        $result = $upgrader->upgrade(MAC_PLUGIN_BASENAME);
+
+        if (is_wp_error($result)) {
+            return self::record_auto_update('error', $result->get_error_message(), $source, $target_version);
+        }
+
+        if (!$result) {
+            $messages = !empty($skin->messages) && is_array($skin->messages) ? implode(' ', array_map('wp_strip_all_tags', $skin->messages)) : 'WordPress upgrader returned no result.';
+            return self::record_auto_update('error', $messages, $source, $target_version);
+        }
+
+        self::clear_cache();
+        return self::record_auto_update('success', 'Plugin updated successfully.', $source, $target_version);
     }
 
     public static function get_latest_release($force)
@@ -244,5 +319,19 @@ class Master_Auto_Catalog_Updater
     private static function package_url($tag)
     {
         return self::repo_url() . '/archive/refs/tags/' . rawurlencode($tag) . '.zip';
+    }
+
+    private static function record_auto_update($status, $message, $source, $version)
+    {
+        $data = [
+            'status' => $status,
+            'message' => $message,
+            'source' => $source,
+            'version' => $version,
+            'time' => current_time('mysql'),
+        ];
+
+        update_option(self::OPTION_LAST_AUTO_UPDATE, $data, false);
+        return $data;
     }
 }
