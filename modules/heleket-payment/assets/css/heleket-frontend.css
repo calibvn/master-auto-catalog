@@ -1,0 +1,456 @@
+/* ============================================
+   Heleket Payment Gateway Styles
+   Modern Blue Theme
+   ============================================ */
+
+/* Main payment button */
+.heleket-pay-button {
+    background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+    color: white;
+    border: none;
+    padding: 14px 28px;
+    border-radius: 12px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    position: relative;
+    overflow: hidden;
+}
+
+.heleket-pay-button:hover {
+    background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
+}
+
+.heleket-pay-button:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+}
+
+.heleket-pay-button:disabled {
+    background: #94A3B8;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.heleket-pay-button::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+    transition: left 0.6s;
+}
+
+.heleket-pay-button:hover::before {
+    left: 100%;
+}
+
+/* Modal overlay */
+.heleket-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 23, 42, 0.8);
+    backdrop-filter: blur(4px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    animation: heleket-fadeIn 0.3s ease;
+}
+
+.heleket-modal {
+    background: white;
+    border-radius: 20px;
+    width: 100%;
+    max-width: 440px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+    animation: heleket-slideUp 0.4s ease;
+    overflow: hidden;
+    margin: 20px;
+}
+
+@keyframes heleket-fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes heleket-slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Modal header */
+.heleket-modal-header {
+    background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+    padding: 24px;
+    color: white;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+}
+
+.heleket-modal-icon {
+    background: rgba(255, 255, 255, 0.2);
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(10px);
+}
+
+.heleket-modal-header h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    flex: 1;
+}
+
+.heleket-modal-close {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    font-size: 20px;
+    transition: all 0.2s;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.heleket-modal-close:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* Modal body */
+.heleket-modal-body {
+    padding: 32px;
+}
+
+.heleket-form-group {
+    margin-bottom: 24px;
+}
+
+.heleket-form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #374151;
+}
+
+.heleket-input-wrapper {
+    position: relative;
+}
+
+.heleket-input-icon {
+    position: absolute;
+    left: 14px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+}
+
+.heleket-form-group input[type="text"], .heleket-form-group input[type="email"] {
+    width: 100%;
+    padding: 14px 14px 14px 40px;
+    border: 2px solid #E5E7EB;
+    border-radius: 10px;
+    font-size: 15px;
+    transition: all 0.3s;
+    background: #F9FAFB;
+}
+
+.heleket-form-group input:focus {
+    outline: none;
+    border-color: #3B82F6;
+    background: white;
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+}
+
+/* Promo code section */
+.heleket-promo-wrapper {
+    display: flex;
+    gap: 8px;
+}
+
+.heleket-promo-wrapper .heleket-input-wrapper {
+    flex: 1;
+}
+
+[type="button"].heleket-promo-btn {
+    background: #10B981;
+    color: white;
+    border: none;
+    padding: 0 20px;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+    white-space: nowrap;
+}
+
+.heleket-promo-btn:hover {
+    background: #059669;
+}
+
+.heleket-promo-btn:disabled {
+    background: #94A3B8;
+    cursor: not-allowed;
+}
+
+/* Promo code messages */
+#heleket-promo-result {
+    margin-top: 8px;
+    min-height: 20px;
+}
+
+.heleket-success {
+    color: #059669;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 4px 0;
+}
+
+.heleket-error {
+    color: #DC2626;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 4px 0;
+}
+
+.heleket-info {
+    color: #6B7280;
+    font-size: 12px;
+    padding: 2px 0;
+}
+
+/* Price info */
+.heleket-price-info {
+    background: #F3F4F6;
+    border-radius: 12px;
+    padding: 20px;
+    margin: 24px 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.heleket-price-label {
+    font-size: 15px;
+    color: #4B5563;
+    font-weight: 500;
+}
+
+.heleket-price-amount {
+    font-size: 28px;
+    font-weight: 700;
+    color: #1F2937;
+}
+
+/* Modal footer */
+.heleket-modal-footer {
+    display: flex;
+    gap: 12px;
+    padding-top: 24px;
+    border-top: 1px solid #E5E7EB;
+}
+
+[type="submit"].heleket-btn, button.heleket-btn {
+    flex: 1;
+    padding: 16px;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 2px solid transparent;
+}
+
+button.heleket-btn-primary {
+    background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+    color: white;
+}
+
+button.heleket-btn-primary:hover {
+    background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+button.heleket-btn-primary:disabled {
+    background: #94A3B8;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+button.heleket-btn-secondary {
+    background: white;
+    color: #4B5563;
+    border-color: #E5E7EB;
+}
+
+button.heleket-btn-secondary:hover {
+    background: #F9FAFB;
+    border-color: #D1D5DB;
+}
+
+/* Loading spinner */
+.heleket-loading {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(15, 23, 42, 0.9);
+    backdrop-filter: blur(8px);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+.heleket-loading-spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(59, 130, 246, 0.3);
+    border-radius: 50%;
+    border-top-color: #3B82F6;
+    animation: heleket-spin 1s linear infinite;
+    margin-bottom: 16px;
+}
+
+.heleket-loading-text {
+    color: white;
+    font-size: 16px;
+    font-weight: 500;
+}
+
+@keyframes heleket-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Success/Error pages */
+.heleket-success-page,
+.heleket-error-page,
+.heleket-pending-page {
+    background: white;
+    border-radius: 16px;
+    padding: 40px;
+    max-width: 500px;
+    margin: 40px auto;
+    text-align: center;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+    border: 1px solid #E5E7EB;
+}
+
+.heleket-success-page h3 {
+    color: #059669;
+    font-size: 24px;
+    margin-bottom: 20px;
+}
+
+.heleket-error-page h3 {
+    color: #DC2626;
+    font-size: 24px;
+    margin-bottom: 20px;
+}
+
+.heleket-pending-page h3 {
+    color: #F59E0B;
+    font-size: 24px;
+    margin-bottom: 20px;
+}
+
+.heleket-success-page p,
+.heleket-error-page p,
+.heleket-pending-page p {
+    color: #4B5563;
+    line-height: 1.6;
+    margin-bottom: 12px;
+}
+
+.heleket-success-page strong {
+    color: #1F2937;
+    font-weight: 600;
+}
+
+/* Responsive design */
+@media (max-width: 480px) {
+    .heleket-modal {
+        margin: 16px;
+        border-radius: 16px;
+    }
+    
+    .heleket-modal-body {
+        padding: 24px;
+    }
+    
+    .heleket-price-info {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+        padding: 16px;
+    }
+    
+    .heleket-price-amount {
+        font-size: 24px;
+    }
+    
+    .heleket-modal-footer {
+        flex-direction: column;
+    }
+    
+    .heleket-btn {
+        width: 100%;
+    }
+    
+    .heleket-pay-button {
+        width: 100%;
+        padding: 16px 24px;
+    }
+}
+
+/* Focus states for accessibility */
+.heleket-btn:focus-visible,
+.heleket-pay-button:focus-visible,
+.heleket-modal-close:focus-visible {
+    outline: 2px solid #3B82F6;
+    outline-offset: 2px;
+}
+
+.heleket-form-group input:focus-visible {
+    outline: none;
+    border-color: #3B82F6;
+    box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.1);
+}

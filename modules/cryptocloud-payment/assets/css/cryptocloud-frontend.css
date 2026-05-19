@@ -1,0 +1,495 @@
+/* Основные стили для CryptoCloud плагина */
+
+/* Стили для модального окна оплаты */
+.cryptocloud-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    animation: fadeIn 0.3s ease;
+}
+
+.cryptocloud-modal {
+    background: white;
+    border-radius: 10px;
+    max-width: 450px;
+    width: 90%;
+    box-shadow: 0 15px 35px rgba(0,0,0,0.3);
+    overflow: hidden;
+    animation: slideIn 0.3s ease;
+}
+
+.cryptocloud-modal-header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 20px;
+    position: relative;
+}
+
+.cryptocloud-modal-header h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.cryptocloud-modal-close {
+    position: absolute;
+    top: 15px;
+    right: 20px;
+    font-size: 28px;
+    cursor: pointer;
+    line-height: 1;
+    transition: transform 0.2s;
+}
+
+.cryptocloud-modal-close:hover {
+    transform: scale(1.2);
+}
+
+.cryptocloud-modal-body {
+    padding: 25px;
+}
+
+.cryptocloud-form-group {
+    margin-bottom: 20px;
+}
+
+.cryptocloud-form-group label {
+    display: block;
+    margin-bottom: 8px;
+    font-weight: 500;
+    color: #333;
+    font-size: 14px;
+}
+
+.cryptocloud-form-group input[type="email"],
+.cryptocloud-form-group input[type="text"],
+.cryptocloud-form-group input[type="url"] {
+    width: 100%;
+    padding: 12px 15px;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.3s;
+    box-sizing: border-box;
+}
+
+.cryptocloud-form-group input:focus {
+    border-color: #667eea;
+    outline: none;
+    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.cryptocloud-promo-wrapper {
+    display: flex;
+    gap: 10px;
+}
+
+.cryptocloud-promo-wrapper input {
+    flex: 1;
+}
+
+.cryptocloud-promo-wrapper .button {
+    background: #28a745;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0 20px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+    white-space: nowrap;
+}
+
+.cryptocloud-promo-wrapper .button:hover {
+    background: #218838;
+    transform: translateY(-1px);
+}
+
+.cryptocloud-promo-wrapper .button:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+    transform: none;
+}
+
+.cryptocloud-price-info {
+    background: #f8f9fa;
+    padding: 15px;
+    border-radius: 6px;
+    margin: 25px 0;
+    text-align: center;
+    border: 2px solid #e9ecef;
+}
+
+.cryptocloud-price-info strong {
+    color: #333;
+    font-size: 16px;
+}
+
+#cryptocloud-final-amount {
+    display: block;
+    font-size: 28px;
+    font-weight: 700;
+    color: #28a745;
+    margin-top: 5px;
+}
+
+.cryptocloud-modal-footer {
+    display: flex;
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.cryptocloud-btn-cancel {
+    flex: 1;
+    background: white;
+    border: 2px solid #6c757d;
+    color: #6c757d;
+    padding: 14px;
+    border-radius: 6px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.cryptocloud-btn-cancel:hover {
+    background: #f8f9fa;
+    transform: translateY(-1px);
+}
+
+.cryptocloud-btn-pay {
+    flex: 2;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 14px;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+}
+
+.cryptocloud-btn-pay:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 7px 14px rgba(102, 126, 234, 0.2);
+}
+
+.cryptocloud-btn-pay:disabled {
+    background: #cccccc;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.cryptocloud-btn-pay:disabled:hover {
+    background: #cccccc;
+    transform: none;
+    box-shadow: none;
+}
+
+/* Стили для уведомлений промокодов */
+#cryptocloud-promo-result {
+    margin-top: 8px;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.cryptocloud-success {
+    background-color: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+}
+
+.cryptocloud-error {
+    background-color: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+}
+
+/* Стили для кнопки оплаты на странице */
+.cryptocloud-pay-button {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    padding: 14px 28px;
+    border-radius: 8px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+}
+
+.cryptocloud-pay-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+}
+
+.cryptocloud-pay-button:active {
+    transform: translateY(0);
+}
+
+.cryptocloud-pay-button:disabled {
+    background: #cccccc;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+.cryptocloud-pay-button::before {
+    content: "🪙";
+    font-size: 18px;
+}
+
+/* Стили для индикатора загрузки */
+.cryptocloud-loading {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+    font-size: 18px;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.cryptocloud-loading-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    border-top-color: #667eea;
+    animation: spin 1s ease-in-out infinite;
+}
+
+/* Стили для страницы успеха */
+.cryptocloud-message-container {
+    max-width: 600px;
+    margin: 40px auto;
+    padding: 20px;
+}
+
+.cryptocloud-success-page {
+    background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+    padding: 30px;
+    border-radius: 12px;
+    border: 1px solid #b1dfbb;
+    text-align: center;
+    box-shadow: 0 5px 20px rgba(213, 245, 227, 0.3);
+}
+
+.cryptocloud-success-page h3 {
+    color: #155724;
+    font-size: 24px;
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.cryptocloud-success-page h3::before {
+    content: "✅";
+    font-size: 28px;
+}
+
+.cryptocloud-success-page p {
+    color: #155724;
+    margin-bottom: 10px;
+    line-height: 1.6;
+}
+
+.cryptocloud-success-page strong {
+    font-weight: 600;
+}
+
+.cryptocloud-pending-page {
+    background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+    padding: 30px;
+    border-radius: 12px;
+    border: 1px solid #ffd966;
+    text-align: center;
+    box-shadow: 0 5px 20px rgba(255, 243, 205, 0.3);
+}
+
+.cryptocloud-pending-page h3 {
+    color: #856404;
+    font-size: 24px;
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.cryptocloud-pending-page h3::before {
+    content: "⏳";
+    font-size: 28px;
+}
+
+.cryptocloud-pending-page p {
+    color: #856404;
+    margin-bottom: 10px;
+    line-height: 1.6;
+}
+
+.cryptocloud-error-page {
+    background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
+    padding: 30px;
+    border-radius: 12px;
+    border: 1px solid #f1aeb5;
+    text-align: center;
+    box-shadow: 0 5px 20px rgba(248, 215, 218, 0.3);
+}
+
+.cryptocloud-error-page h3 {
+    color: #721c24;
+    font-size: 24px;
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+}
+
+.cryptocloud-error-page h3::before {
+    content: "❌";
+    font-size: 28px;
+}
+
+.cryptocloud-error-page p {
+    color: #721c24;
+    margin-bottom: 10px;
+    line-height: 1.6;
+}
+
+.cryptocloud-info {
+    background-color: #d1ecf1;
+    color: #0c5460;
+    border: 1px solid #bee5eb;
+    border-radius: 4px;
+}
+
+/* Анимации */
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateY(-30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* Адаптивные стили */
+@media (max-width: 480px) {
+    .cryptocloud-modal {
+        width: 95%;
+        margin: 10px;
+    }
+    
+    .cryptocloud-modal-header {
+        padding: 15px;
+    }
+    
+    .cryptocloud-modal-body {
+        padding: 20px;
+    }
+    
+    .cryptocloud-modal-footer {
+        flex-direction: column;
+    }
+    
+    .cryptocloud-btn-cancel,
+    .cryptocloud-btn-pay {
+        width: 100%;
+    }
+    
+    .cryptocloud-promo-wrapper {
+        flex-direction: column;
+    }
+    
+    .cryptocloud-promo-wrapper .button {
+        width: 100%;
+        margin-top: 10px;
+    }
+    
+    .cryptocloud-pay-button {
+        padding: 12px 20px;
+        font-size: 15px;
+        width: 100%;
+    }
+}
+
+/* Стили для темной темы */
+@media (prefers-color-scheme: dark) {
+    .cryptocloud-modal {
+        background: #1a1a1a;
+        color: #ffffff;
+    }
+    
+    .cryptocloud-form-group label {
+        color: #e0e0e0;
+    }
+    
+    .cryptocloud-form-group input {
+        background: #2d2d2d;
+        border-color: #404040;
+        color: #ffffff;
+    }
+    
+    .cryptocloud-form-group input:focus {
+        border-color: #667eea;
+        background: #2d2d2d;
+    }
+    
+    .cryptocloud-price-info {
+        background: #2d2d2d;
+        border-color: #404040;
+    }
+    
+    .cryptocloud-price-info strong {
+        color: #e0e0e0;
+    }
+    
+    .cryptocloud-btn-cancel {
+        background: #2d2d2d;
+        border-color: #404040;
+        color: #e0e0e0;
+    }
+    
+    .cryptocloud-btn-cancel:hover {
+        background: #404040;
+    }
+}

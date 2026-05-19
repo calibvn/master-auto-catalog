@@ -1,0 +1,84 @@
+/* Стили для админки Heleket */
+.heleket-status {
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-weight: bold;
+    display: inline-block;
+}
+
+.heleket-status-completed {
+    background: #d4edda;
+    color: #155724;
+}
+
+.heleket-status-pending {
+    background: #fff3cd;
+    color: #856404;
+}
+
+.heleket-status-failed {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.heleket-status-active {
+    background: #d4edda;
+    color: #155724;
+}
+
+.heleket-status-inactive {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+/* Карточки в админке */
+.card.full {
+    max-width: 100%;
+}
+
+.card.full .regular-text {
+    width: max-content;
+}
+
+/* Таблицы в админке */
+.wp-list-table th {
+    font-weight: 600;
+}
+
+/* Стили для модального окна в админке */
+#edit-promo-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+}
+
+#edit-promo-modal > div {
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    max-width: 100%;
+    width: 90%;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+}
+
+/* Кнопки в админке */
+.button.button-small {
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+.button-link-delete {
+    color: #dc3232;
+}
+
+.button-link-delete:hover {
+    color: #a00;
+}

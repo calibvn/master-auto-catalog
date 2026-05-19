@@ -1,0 +1,211 @@
+#adminmenu #toplevel_page_master-auto-catalog > a {
+    background: linear-gradient(135deg, #0f766e, #2563eb) !important;
+    color: #fff !important;
+    margin: 6px 6px 6px 0;
+    border-radius: 0 8px 8px 0;
+    box-shadow: inset 3px 0 0 #facc15;
+}
+
+#adminmenu #toplevel_page_master-auto-catalog .wp-menu-image:before,
+#adminmenu #toplevel_page_master-auto-catalog .wp-menu-name {
+    color: #fff !important;
+}
+
+#adminmenu #toplevel_page_master-auto-catalog.wp-has-current-submenu > a,
+#adminmenu #toplevel_page_master-auto-catalog.current > a {
+    background: linear-gradient(135deg, #0d9488, #1d4ed8) !important;
+}
+
+.mac-wrap {
+    max-width: 1180px;
+}
+
+.mac-hero {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-left: 5px solid #0f766e;
+    padding: 20px 24px;
+    margin: 18px 0;
+    border-radius: 6px;
+}
+
+.mac-hero h2 {
+    margin: 0 0 8px;
+    font-size: 24px;
+}
+
+.mac-hero p {
+    margin: 0;
+    font-size: 15px;
+    color: #475569;
+}
+
+.mac-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+    margin: 18px 0;
+}
+
+.mac-card {
+    display: block;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 16px;
+    text-decoration: none;
+    color: #1e293b;
+}
+
+.mac-card:hover {
+    border-color: #2563eb;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, .08);
+}
+
+.mac-card strong {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 16px;
+}
+
+.mac-card span {
+    display: block;
+    color: #475569;
+    line-height: 1.45;
+}
+
+.mac-help {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-left: 5px solid #2563eb;
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 24px 0 12px;
+    max-width: 980px;
+}
+
+.mac-help h2 {
+    margin: 0 0 12px;
+    font-size: 18px;
+}
+
+.mac-help ol {
+    margin: 0 0 0 20px;
+}
+
+.mac-help li {
+    margin: 8px 0;
+    line-height: 1.45;
+}
+
+.mac-section-title {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-left: 5px solid #0f766e;
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 16px 0;
+}
+
+.mac-section-title h1 {
+    margin: 0 0 6px;
+    padding: 0;
+}
+
+.mac-section-title p {
+    margin: 0;
+    color: #475569;
+    font-size: 14px;
+}
+
+.mac-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+    margin: 18px 0;
+}
+
+.mac-status-card {
+    display: grid;
+    grid-template-columns: 14px 1fr;
+    column-gap: 10px;
+    row-gap: 5px;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 15px;
+    text-decoration: none;
+    color: #1e293b;
+}
+
+.mac-status-card:hover {
+    border-color: #2563eb;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, .08);
+}
+
+.mac-status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-top: 5px;
+    background: #f59e0b;
+}
+
+.mac-status-good .mac-status-dot {
+    background: #16a34a;
+}
+
+.mac-status-warn .mac-status-dot {
+    background: #f59e0b;
+}
+
+.mac-status-card strong {
+    font-size: 15px;
+}
+
+.mac-status-card em {
+    grid-column: 2;
+    color: #475569;
+    font-style: normal;
+}
+
+.mac-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 12px 0 16px;
+    border-bottom: 1px solid #cbd5e1;
+}
+
+.mac-tabs a {
+    display: inline-block;
+    padding: 10px 14px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-bottom: 0;
+    border-radius: 6px 6px 0 0;
+    color: #1e293b;
+    text-decoration: none;
+}
+
+.mac-tabs a.is-active {
+    background: #fff;
+    color: #0f766e;
+    box-shadow: inset 0 3px 0 #0f766e;
+    font-weight: 600;
+}
+
+.mac-admin-page + .wrap h1 {
+    margin-top: 10px;
+}
+
+.wrap .card,
+.wrap .postbox,
+.wrap .gai-stats-card {
+    border-radius: 6px;
+    border-color: #cbd5e1;
+}
+
+.wrap .form-table th {
+    color: #1e293b;
+}

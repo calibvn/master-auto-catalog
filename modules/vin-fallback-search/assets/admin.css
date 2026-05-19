@@ -1,0 +1,63 @@
+.vin-status-active { 
+    color: green; 
+    font-weight: bold; 
+}
+
+.vin-status-inactive { 
+    color: red; 
+}
+
+.vin-debug-log {
+    background: #f1f1f1;
+    padding: 15px;
+    border-radius: 4px;
+    margin-top: 20px;
+    max-height: 400px;
+    overflow: auto;
+    font-family: monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+}
+
+.vin-provider-status {
+    display: inline-block;
+    padding: 4px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    margin-left: 10px;
+}
+
+.vin-provider-active {
+    background: #d4edda;
+    color: #155724;
+}
+
+.vin-provider-inactive {
+    background: #f8d7da;
+    color: #721c24;
+}
+
+.vin-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 15px;
+    margin: 20px 0;
+}
+
+.vin-stat-card {
+    background: white;
+    padding: 15px;
+    border-radius: 4px;
+    border-left: 4px solid #0073aa;
+}
+
+.vin-stat-number {
+    font-size: 24px;
+    font-weight: bold;
+    color: #0073aa;
+}
+
+.vin-stat-label {
+    font-size: 14px;
+    color: #666;
+}
