@@ -221,7 +221,7 @@ class Master_Auto_Catalog_Updater
     public static function install_available_update($release = null, $source = 'manual')
     {
         if (get_site_transient(self::TRANSIENT_UPDATE_LOCK)) {
-            return self::record_auto_update('skipped', 'Another update is already running.', $source, '');
+            return self::record_auto_update('skipped', 'Another update is already running.', $source, '', false);
         }
 
         set_site_transient(self::TRANSIENT_UPDATE_LOCK, 1, 10 * MINUTE_IN_SECONDS);
@@ -239,7 +239,7 @@ class Master_Auto_Catalog_Updater
         $current_version = self::current_version();
         if (!version_compare($target_version, $current_version, '>')) {
             delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
-            return self::record_auto_update('skipped', 'No newer version is available.', $source, $target_version);
+            return self::record_auto_update('skipped', 'No newer version is available.', $source, $target_version, false);
         }
 
         if (!function_exists('request_filesystem_credentials')) {
@@ -358,7 +358,7 @@ class Master_Auto_Catalog_Updater
         return self::repo_url() . '/archive/refs/tags/' . rawurlencode($tag) . '.zip';
     }
 
-    private static function record_auto_update($status, $message, $source, $version)
+    private static function record_auto_update($status, $message, $source, $version, $store_as_last = true)
     {
         $data = [
             'status' => $status,
@@ -368,7 +368,9 @@ class Master_Auto_Catalog_Updater
             'time' => current_time('mysql'),
         ];
 
-        update_option(self::OPTION_LAST_AUTO_UPDATE, $data, false);
+        if ($store_as_last) {
+            update_option(self::OPTION_LAST_AUTO_UPDATE, $data, false);
+        }
         self::log('Update finished.', $data);
         return $data;
     }
