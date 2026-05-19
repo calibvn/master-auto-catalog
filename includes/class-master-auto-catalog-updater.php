@@ -6,6 +6,8 @@ class Master_Auto_Catalog_Updater
 {
     const OPTION_SECRET = 'mac_github_webhook_secret';
     const OPTION_LAST_AUTO_UPDATE = 'mac_github_last_auto_update';
+    const OPTION_UPDATE_LOG = 'mac_github_update_log';
+    const TRANSIENT_UPDATE_LOCK = 'mac_github_update_lock';
     const TRANSIENT_RELEASE = 'mac_github_latest_release';
     const TRANSIENT_TIMEOUT = 6 * HOUR_IN_SECONDS;
 
@@ -44,6 +46,12 @@ class Master_Auto_Catalog_Updater
     {
         $data = get_option(self::OPTION_LAST_AUTO_UPDATE, []);
         return is_array($data) ? $data : [];
+    }
+
+    public static function get_update_log()
+    {
+        $log = get_option(self::OPTION_UPDATE_LOG, []);
+        return is_array($log) ? $log : [];
     }
 
     public static function check_for_update($transient)
@@ -156,6 +164,7 @@ class Master_Auto_Catalog_Updater
 
         $auto_update = null;
         if ($event === 'release' && in_array($action, ['published', 'released'], true)) {
+            self::log('Webhook accepted.', ['event' => $event, 'action' => $action]);
             self::clear_cache();
             $release = self::get_latest_release(true);
             $auto_update = self::install_available_update($release, 'github_webhook');
@@ -211,17 +220,25 @@ class Master_Auto_Catalog_Updater
 
     public static function install_available_update($release = null, $source = 'manual')
     {
+        if (get_site_transient(self::TRANSIENT_UPDATE_LOCK)) {
+            return self::record_auto_update('skipped', 'Another update is already running.', $source, '');
+        }
+
+        set_site_transient(self::TRANSIENT_UPDATE_LOCK, 1, 10 * MINUTE_IN_SECONDS);
+
         if (!$release) {
             $release = self::get_latest_release(true);
         }
 
         if (!$release || empty($release['version']) || empty($release['package'])) {
+            delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
             return self::record_auto_update('error', 'No GitHub release package was found.', $source, '');
         }
 
         $target_version = (string) $release['version'];
         $current_version = self::current_version();
         if (!version_compare($target_version, $current_version, '>')) {
+            delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
             return self::record_auto_update('skipped', 'No newer version is available.', $source, $target_version);
         }
 
@@ -231,6 +248,9 @@ class Master_Auto_Catalog_Updater
         if (!function_exists('get_plugins')) {
             require_once ABSPATH . 'wp-admin/includes/plugin.php';
         }
+        if (!function_exists('is_plugin_active')) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
         if (!class_exists('Plugin_Upgrader')) {
             require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
         }
@@ -238,24 +258,41 @@ class Master_Auto_Catalog_Updater
             require_once ABSPATH . 'wp-includes/update.php';
         }
 
+        $was_active = is_plugin_active(MAC_PLUGIN_BASENAME);
+        self::log('Starting plugin update.', [
+            'source' => $source,
+            'from' => $current_version,
+            'to' => $target_version,
+            'was_active' => $was_active ? 'yes' : 'no',
+        ]);
+
         self::clear_cache();
         wp_update_plugins();
 
         $skin = new Automatic_Upgrader_Skin();
         $upgrader = new Plugin_Upgrader($skin);
         $result = $upgrader->upgrade(MAC_PLUGIN_BASENAME);
+        $version_after = self::current_version();
+        $messages = !empty($skin->messages) && is_array($skin->messages) ? implode(' ', array_map('wp_strip_all_tags', $skin->messages)) : '';
+
+        if ($was_active && !is_plugin_active(MAC_PLUGIN_BASENAME)) {
+            self::restore_active_plugin_flag();
+            self::log('Plugin active flag restored after update.');
+        }
 
         if (is_wp_error($result)) {
+            delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
             return self::record_auto_update('error', $result->get_error_message(), $source, $target_version);
         }
 
-        if (!$result) {
-            $messages = !empty($skin->messages) && is_array($skin->messages) ? implode(' ', array_map('wp_strip_all_tags', $skin->messages)) : 'WordPress upgrader returned no result.';
-            return self::record_auto_update('error', $messages, $source, $target_version);
+        if (version_compare($version_after, $target_version, '>=')) {
+            self::clear_cache();
+            delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
+            return self::record_auto_update('success', 'Plugin updated successfully. ' . $messages, $source, $target_version);
         }
 
-        self::clear_cache();
-        return self::record_auto_update('success', 'Plugin updated successfully.', $source, $target_version);
+        delete_site_transient(self::TRANSIENT_UPDATE_LOCK);
+        return self::record_auto_update('error', $messages ?: 'WordPress upgrader returned no result and plugin version did not change.', $source, $target_version);
     }
 
     public static function get_latest_release($force)
@@ -332,6 +369,44 @@ class Master_Auto_Catalog_Updater
         ];
 
         update_option(self::OPTION_LAST_AUTO_UPDATE, $data, false);
+        self::log('Update finished.', $data);
         return $data;
+    }
+
+    private static function restore_active_plugin_flag()
+    {
+        if (is_multisite() && is_plugin_active_for_network(MAC_PLUGIN_BASENAME)) {
+            $active_sitewide = get_site_option('active_sitewide_plugins', []);
+            if (!is_array($active_sitewide)) {
+                $active_sitewide = [];
+            }
+            $active_sitewide[MAC_PLUGIN_BASENAME] = time();
+            update_site_option('active_sitewide_plugins', $active_sitewide);
+            return;
+        }
+
+        $active_plugins = get_option('active_plugins', []);
+        if (!is_array($active_plugins)) {
+            $active_plugins = [];
+        }
+
+        if (!in_array(MAC_PLUGIN_BASENAME, $active_plugins, true)) {
+            $active_plugins[] = MAC_PLUGIN_BASENAME;
+            sort($active_plugins);
+            update_option('active_plugins', $active_plugins);
+        }
+    }
+
+    private static function log($message, array $context = [])
+    {
+        $log = self::get_update_log();
+        array_unshift($log, [
+            'time' => current_time('mysql'),
+            'message' => $message,
+            'context' => $context,
+        ]);
+
+        $log = array_slice($log, 0, 30);
+        update_option(self::OPTION_UPDATE_LOG, $log, false);
     }
 }

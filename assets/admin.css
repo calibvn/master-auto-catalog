@@ -247,3 +247,19 @@
     background: #fef3c7;
     color: #92400e;
 }
+
+.mac-update-log {
+    border-top: 1px solid #cbd5e1;
+    margin-top: 18px;
+    padding-top: 16px;
+}
+
+.mac-update-log td:first-child {
+    width: 170px;
+}
+
+.mac-update-log pre {
+    white-space: pre-wrap;
+    margin: 8px 0 0;
+    max-width: 720px;
+}

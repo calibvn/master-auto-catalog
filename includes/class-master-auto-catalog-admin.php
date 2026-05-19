@@ -267,6 +267,7 @@ class Master_Auto_Catalog_Admin
         $secret = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_secret() : '';
         $webhook_url = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::webhook_url() : '';
         $last_update = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_last_auto_update() : [];
+        $update_log = class_exists('Master_Auto_Catalog_Updater') ? Master_Auto_Catalog_Updater::get_update_log() : [];
         ?>
         <div class="wrap mac-wrap">
             <div class="mac-update-panel">
@@ -341,6 +342,29 @@ class Master_Auto_Catalog_Admin
                         <?php submit_button('Install update now', 'primary'); ?>
                     </form>
                 <?php endif; ?>
+
+                <div class="mac-update-log">
+                    <h2>Update log</h2>
+                    <?php if ($update_log) : ?>
+                        <table class="widefat striped">
+                            <tbody>
+                            <?php foreach ($update_log as $entry) : ?>
+                                <tr>
+                                    <td><code><?php echo esc_html($entry['time'] ?? ''); ?></code></td>
+                                    <td>
+                                        <strong><?php echo esc_html($entry['message'] ?? ''); ?></strong>
+                                        <?php if (!empty($entry['context']) && is_array($entry['context'])) : ?>
+                                            <pre><?php echo esc_html(wp_json_encode($entry['context'], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)); ?></pre>
+                                        <?php endif; ?>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    <?php else : ?>
+                        <p>No update log entries yet.</p>
+                    <?php endif; ?>
+                </div>
             </div>
         </div>
         <?php
