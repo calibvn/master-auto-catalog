@@ -6,6 +6,7 @@ class MAC_VIN_Remove_Sync
 {
     private const DEFAULT_ENDPOINT = 'https://report-vin.com/api/internal-ingest.php';
     private const ALL_VIN_STORY_ENDPOINT = 'https://allvinstory.com/api/internal-ingest.php';
+    private const GET_VIN_ENDPOINT = 'https://get-vin.com/api/internal-ingest.php';
     private const DEFAULT_KEY = 'Fcrfhjgnjv123';
     private static $initialized = false;
 
@@ -79,6 +80,10 @@ class MAC_VIN_Remove_Sync
             ],
             [
                 'endpoint' => self::ALL_VIN_STORY_ENDPOINT,
+                'key' => $key,
+            ],
+            [
+                'endpoint' => self::GET_VIN_ENDPOINT,
                 'key' => $key,
             ],
         ]);
