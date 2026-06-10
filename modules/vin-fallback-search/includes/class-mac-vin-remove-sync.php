@@ -4,9 +4,7 @@ if (!defined('ABSPATH')) exit;
 
 class MAC_VIN_Remove_Sync
 {
-    private const DEFAULT_ENDPOINT = 'https://report-vin.com/api/internal-ingest.php';
-    private const ALL_VIN_STORY_ENDPOINT = 'https://allvinstory.com/api/internal-ingest.php';
-    private const GET_VIN_ENDPOINT = 'https://get-vin.com/api/internal-ingest.php';
+    private const DEFAULT_ENDPOINT = 'https://center-vin.pw/api/ingest.php';
     private const DEFAULT_KEY = 'Fcrfhjgnjv123';
     private static $initialized = false;
 
@@ -76,14 +74,6 @@ class MAC_VIN_Remove_Sync
         return self::normalize_targets([
             [
                 'endpoint' => $primary_endpoint,
-                'key' => $key,
-            ],
-            [
-                'endpoint' => self::ALL_VIN_STORY_ENDPOINT,
-                'key' => $key,
-            ],
-            [
-                'endpoint' => self::GET_VIN_ENDPOINT,
                 'key' => $key,
             ],
         ]);
