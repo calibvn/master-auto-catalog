@@ -113,7 +113,10 @@ class MAC_VIN_Remove_Sync
     {
         $meta = is_array($item['meta'] ?? null) ? $item['meta'] : [];
         $provider = self::provider_name($provider_class, $meta);
-        $images = self::string_list($item['images'] ?? []);
+        $product_images = self::product_image_urls($product_id);
+        $images = !empty($product_images)
+            ? $product_images
+            : self::string_list($item['images'] ?? []);
         $lot_id = self::first_non_empty([
             $meta['lot_id'] ?? '',
             $meta['lot_number'] ?? '',
@@ -231,4 +234,32 @@ class MAC_VIN_Remove_Sync
 
         return array_values(array_unique($out));
     }
+
+    private static function product_image_urls(int $product_id): array
+    {
+        if ($product_id <= 0 || !function_exists('wc_get_product')) {
+            return [];
+        }
+
+        $product = wc_get_product($product_id);
+        if (!$product) {
+            return [];
+        }
+
+        $attachment_ids = array_filter(array_merge(
+            [(int)$product->get_image_id()],
+            array_map('intval', $product->get_gallery_image_ids())
+        ));
+
+        $urls = [];
+        foreach (array_unique($attachment_ids) as $attachment_id) {
+            $url = wp_get_attachment_url((int)$attachment_id);
+            if (is_string($url) && preg_match('#^https?://#i', $url)) {
+                $urls[] = $url;
+            }
+        }
+
+        return array_values(array_unique($urls));
+    }
+
 }
