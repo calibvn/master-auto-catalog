@@ -45,7 +45,6 @@ class VINFallbackSearch
         require_once $includes_dir . 'class-vin-image-processor.php';
         require_once $includes_dir . 'class-vin-data-normalizer.php';
         require_once $includes_dir . 'class-vin-attribute-manager.php';
-        require_once $includes_dir . 'class-mac-vin-remove-sync.php';
     }
 
     /**
@@ -71,16 +70,11 @@ class VINFallbackSearch
         add_action('admin_init', [$this, 'settings_init']);
         add_action('admin_enqueue_scripts', [$this, 'admin_styles']);
         add_action('wp_ajax_vin_fallback_test_provider', [$this, 'ajax_test_provider']);
+        add_action('rest_api_init', [$this, 'register_rest_routes']);
 
         // Оптимизация: очистка кэша
         add_action('save_post_product', [$this, 'clear_product_cache_on_save']);
         add_action('deleted_post', [$this, 'clear_product_cache_on_delete']);
-        MAC_VIN_Remove_Sync::init();
-
-        // Debug endpoint - только если включен дебаг
-        if (VIN_FS_DEBUG) {
-            add_action('init', [$this, 'debug_endpoint']);
-        }
     }
 
     /**
@@ -570,8 +564,8 @@ class VINFallbackSearch
                 </ol>
 
                 <h3>Отладка</h3>
-                <p>Для тестирования используйте URL: <code>/?vin_debug=YOUR_VIN_HERE</code></p>
-                <p>Пример: <code>/?vin_debug=19VDE1F5XDE010374</code></p>
+                <p>Для тестирования используйте REST URL: <code>/wp-json/master-auto-catalog/v1/vin-data?vin=YOUR_VIN_HERE</code></p>
+                <p>Пример: <code>/wp-json/master-auto-catalog/v1/vin-data?vin=19VDE1F5XDE010374</code></p>
             </div>
         </div>
         <script>
@@ -640,7 +634,7 @@ class VINFallbackSearch
                 <h3>Быстрые действия</h3>
                 <p>
                     <a href="<?php echo admin_url('admin.php?page=vin-fallback-settings'); ?>" class="button button-primary">Настройки API</a>
-                    <a href="/?vin_debug=19VDE1F5XDE010374" target="_blank" class="button">Тестовый поиск</a>
+                    <a href="<?php echo esc_url(rest_url('master-auto-catalog/v1/vin-data?vin=19VDE1F5XDE010374')); ?>" target="_blank" class="button">Тестовый поиск</a>
                 </p>
             </div>
         </div>
@@ -972,8 +966,6 @@ class VINFallbackSearch
         if (VIN_FS_DEBUG) {
             error_log('[VIN Fallback] New product created: #' . $post_id);
         }
-
-        do_action('vin_fallback_vehicle_imported', (int)$post_id, $item, $provider_class);
 
         return (int)$post_id;
     }
@@ -1316,61 +1308,75 @@ class VINFallbackSearch
         wp_send_json_success($out);
     }
 
-    /**
-     * Debug-эндпоинт (обновленный для передачи провайдера)
-     */
-    public function debug_endpoint()
+    public function register_rest_routes()
     {
-        if (!isset($_GET['vin_debug'])) return;
+        register_rest_route('master-auto-catalog/v1', '/vin-data', [
+            'methods' => 'GET',
+            'callback' => [$this, 'rest_get_vin_data'],
+            'permission_callback' => [$this, 'rest_can_read_vin_data'],
+            'args' => [
+                'vin' => [
+                    'required' => true,
+                ],
+            ],
+        ]);
+    }
 
-        $vin = strtoupper(preg_replace('/\s+/', '', sanitize_text_field((string)$_GET['vin_debug'])));
-        $do_create = !empty($_GET['create']);
+    public function rest_can_read_vin_data($request)
+    {
+        $configured_key = trim((string)get_option('cas_sync_key', ''));
+        $request_key = trim((string)$request->get_header('X-API-Key'));
+
+        return $configured_key !== '' && hash_equals($configured_key, $request_key);
+    }
+
+    public function rest_get_vin_data($request)
+    {
+        $vin = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', sanitize_text_field((string)$request->get_param('vin'))));
+        if (!$this->is_valid_vin($vin)) {
+            return new WP_Error('invalid_vin', 'Invalid VIN format', ['status' => 400]);
+        }
 
         $providers = apply_filters('vin_fallback_providers', []);
         $out = [
-            'vin'       => $vin,
-            'create'    => (bool)$do_create,
+            'vin' => $vin,
+            'providers_count' => count($providers),
             'providers' => [],
-            'created'   => null,
-            'existing_product' => $this->check_existing_product($vin),
         ];
 
-        foreach ($providers as $p) {
+        foreach ($providers as $provider) {
+            $provider_class = get_class($provider);
+            $started = microtime(true);
+
             try {
-                $provider_class = get_class($p);
-                $t = microtime(true);
-                $item = $p->search($vin);
+                $item = $provider->search($vin);
+                $generated_title = $item ? $this->build_product_title($item, $provider_class) : null;
 
                 $out['providers'][] = [
-                    'class'        => $provider_class,
-                    'elapsed_ms'   => round((microtime(true) - $t) * 1000),
-                    'found'        => (bool)$item,
-                    'item_preview' => $item ? array_intersect_key($item, array_flip(['sku', 'title', 'price'])) : null,
-                    'generated_title' => $item ? $this->build_product_title($item, $provider_class) : null,
-                    'item'         => $item,
+                    'class' => $provider_class,
+                    'tag' => $this->get_provider_tag($provider_class),
+                    'elapsed_ms' => round((microtime(true) - $started) * 1000),
+                    'found' => (bool)$item,
+                    'generated_title' => $generated_title,
+                    'generated_slug' => $item ? $this->build_product_slug($item, $generated_title, $item['sku'] ?? $vin, $provider_class) : null,
+                    'item' => $item,
                 ];
-
-                if ($item && $do_create) {
-                    $pid = $this->create_or_get_product($item, $provider_class);
-                    $out['created'] = [
-                        'product_id' => $pid,
-                        'permalink'  => $pid ? get_permalink($pid) : null,
-                        'provider_tag' => $this->get_provider_tag($provider_class),
-                    ];
-                    break;
-                }
-            } catch (Exception $e) {
+            } catch (\Throwable $e) {
                 $out['providers'][] = [
-                    'class' => get_class($p),
+                    'class' => $provider_class,
+                    'tag' => $this->get_provider_tag($provider_class),
+                    'elapsed_ms' => round((microtime(true) - $started) * 1000),
+                    'found' => false,
                     'error' => $e->getMessage(),
                 ];
             }
         }
 
-        nocache_headers();
-        wp_send_json($out);
+        return [
+            'success' => true,
+            'data' => $out,
+        ];
     }
-
     /**
      * Массовое обновление метаданных
      */
