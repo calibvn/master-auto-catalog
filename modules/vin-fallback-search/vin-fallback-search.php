@@ -1320,6 +1320,17 @@ class VINFallbackSearch
                 ],
             ],
         ]);
+
+        register_rest_route('master-auto-catalog/v1', '/local-vin-data', [
+            'methods' => 'GET',
+            'callback' => [$this, 'rest_get_local_vin_data'],
+            'permission_callback' => [$this, 'rest_can_read_vin_data'],
+            'args' => [
+                'vin' => [
+                    'required' => true,
+                ],
+            ],
+        ]);
     }
 
     public function rest_can_read_vin_data($request)
@@ -1380,6 +1391,103 @@ class VINFallbackSearch
     /**
      * Массовое обновление метаданных
      */
+    public function rest_get_local_vin_data($request)
+    {
+        $vin = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', sanitize_text_field((string)$request->get_param('vin'))));
+        if (!$this->is_valid_vin($vin)) {
+            return new WP_Error('invalid_vin', 'Invalid VIN format', ['status' => 400]);
+        }
+
+        $item = $this->build_local_vin_item($vin);
+        $provider = [
+            'class' => 'Local_Woo_Product',
+            'tag' => 'Local Woo Product',
+            'found' => (bool)$item,
+            'item' => $item,
+        ];
+
+        return [
+            'success' => true,
+            'data' => [
+                'vin' => $vin,
+                'providers_count' => 1,
+                'providers' => [$provider],
+            ],
+        ];
+    }
+
+    private function build_local_vin_item(string $vin): ?array
+    {
+        $post_id = $this->get_product_id_by_sku_any_status($vin);
+        if ($post_id <= 0 || get_post_type($post_id) !== 'product') {
+            return null;
+        }
+
+        $meta = $this->get_local_product_meta($post_id, $vin);
+        $price = get_post_meta($post_id, '_price', true);
+
+        return [
+            'sku' => $vin,
+            'title' => get_the_title($post_id),
+            'price' => is_numeric($price) ? (float)$price : 0,
+            'meta' => $meta,
+            'images' => $this->get_local_product_images($post_id),
+        ];
+    }
+
+    private function get_local_product_meta(int $post_id, string $vin): array
+    {
+        $raw_meta = get_post_meta($post_id);
+        $meta = [
+            'vin' => $vin,
+            'permalink' => get_permalink($post_id),
+            'post_status' => get_post_status($post_id),
+        ];
+
+        foreach ($raw_meta as $key => $values) {
+            if ($key === '' || $key[0] === '_') {
+                continue;
+            }
+
+            $value = is_array($values) ? reset($values) : $values;
+            if (is_scalar($value) && trim((string)$value) !== '') {
+                $meta[$key] = sanitize_text_field((string)$value);
+            }
+        }
+
+        foreach (['make', 'model', 'year', 'engine', 'lot_id', 'lot_number', 'odometer', 'damage_primary', 'damage_secondary', 'damage_pr', 'damage_sec', 'color', 'location', 'sale_date', 'sale_status', 'auction', 'raw_api_source'] as $key) {
+            if (!isset($meta[$key])) {
+                $value = get_post_meta($post_id, $key, true);
+                if (is_scalar($value) && trim((string)$value) !== '') {
+                    $meta[$key] = sanitize_text_field((string)$value);
+                }
+            }
+        }
+
+        return $meta;
+    }
+
+    private function get_local_product_images(int $post_id): array
+    {
+        $images = [];
+        $thumb_id = (int)get_post_thumbnail_id($post_id);
+        if ($thumb_id > 0) {
+            $url = wp_get_attachment_url($thumb_id);
+            if ($url) {
+                $images[] = $url;
+            }
+        }
+
+        $gallery = (string)get_post_meta($post_id, '_product_image_gallery', true);
+        foreach (array_filter(array_map('trim', explode(',', $gallery))) as $attachment_id) {
+            $url = wp_get_attachment_url((int)$attachment_id);
+            if ($url) {
+                $images[] = $url;
+            }
+        }
+
+        return array_values(array_unique(array_filter($images)));
+    }
     private function update_post_meta_batch($post_id, $meta_array)
     {
         foreach ($meta_array as $key => $value) {
