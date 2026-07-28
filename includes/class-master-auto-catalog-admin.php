@@ -21,6 +21,7 @@ class Master_Auto_Catalog_Admin
         add_submenu_page(self::MENU_SLUG, 'Обзор', 'Обзор', 'manage_options', self::MENU_SLUG, [__CLASS__, 'overview_page']);
         add_submenu_page(self::MENU_SLUG, 'Загрузка авто по API', 'Загрузка авто по API', 'manage_options', 'vin-fallback-settings', [__CLASS__, 'vin_settings_page']);
         add_submenu_page(self::MENU_SLUG, 'Логи поиска', 'Логи поиска', 'manage_options', 'wp-search-logs', [__CLASS__, 'search_logs_page']);
+        add_submenu_page(self::MENU_SLUG, 'Telegram отчёты', 'Telegram отчёты', 'manage_options', 'mac-telegram-search-reports', [__CLASS__, 'telegram_search_reports_page']);
         add_submenu_page(self::MENU_SLUG, 'Синхронизация с центром', 'Синхронизация с центром', 'manage_options', 'central-auto-sync', [__CLASS__, 'central_sync_page']);
         add_submenu_page(self::MENU_SLUG, 'Индексация Google', 'Индексация Google', 'manage_options', 'vin-google-index', [__CLASS__, 'google_page']);
         add_submenu_page(self::MENU_SLUG, 'Heleket', 'Heleket', 'manage_options', 'heleket-settings', [__CLASS__, 'heleket_page']);
@@ -97,6 +98,17 @@ class Master_Auto_Catalog_Admin
             'Логируются только фронтовые поиски, администраторские запросы исключаются.',
             'CSV нужен для анализа спроса: какие VIN или модели пользователи ищут чаще всего.',
             'Очистка удаляет все записи из таблицы search_logs.',
+        ]);
+    }
+
+    public static function telegram_search_reports_page()
+    {
+        self::section_header('Telegram отчёты', 'Ежедневная и еженедельная сводка поисков VIN.');
+        self::call_function_page('mac_tsr_settings_page');
+        self::help_block('Расписание', [
+            'Ежедневный отчёт отправляется после полуночи за предыдущий день.',
+            'Недельный отчёт отправляется в понедельник после полуночи за предыдущие 7 дней.',
+            'Если за период нет VIN-поисков, сообщение не отправляется.',
         ]);
     }
 
