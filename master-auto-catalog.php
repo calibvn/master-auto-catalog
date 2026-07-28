@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.21
+ * Version: 1.0.22
  * Author: AskarTech
  */
 
@@ -23,7 +23,6 @@ function mac_load_modules()
 {
     $modules = [
         'wp-search-logs/wp-search-logs.php',
-        'telegram-search-reports/telegram-search-reports.php',
         'vin-fallback-search/vin-fallback-search.php',
         'google-auto-index/google-auto-index.php',
         'vin-centr_bd/wordpress-sync.php',
@@ -85,8 +84,8 @@ function mac_deactivate()
     wp_clear_scheduled_hook('gai_cleanup_logs');
     wp_clear_scheduled_hook('heleket_check_pending_payments');
     wp_clear_scheduled_hook('cryptocloud_check_pending_payments');
-    wp_clear_scheduled_hook('mac_telegram_search_reports_daily');
-    wp_clear_scheduled_hook('mac_telegram_search_reports_weekly');
+    wp_clear_scheduled_hook('mac_search_logs_telegram_daily');
+    wp_clear_scheduled_hook('mac_search_logs_telegram_weekly');
 }
 
 function mac_create_search_logs_table()
