@@ -9,6 +9,18 @@
 
 if (!defined('ABSPATH')) exit;
 
+function wp_search_logs_normalize_vin($search_query)
+{
+    $vin = strtoupper(preg_replace('/[\s-]+/', '', trim((string) $search_query)));
+
+    return preg_match('/^[A-HJ-NPR-Z0-9]{17}$/', $vin) ? $vin : '';
+}
+
+function wp_search_logs_vin_sql_condition()
+{
+    return "CHAR_LENGTH(query) = 17 AND UPPER(query) REGEXP '^[A-HJ-NPR-Z0-9]{17}$'";
+}
+
 /**
  * Ловим поисковые запросы - исправленная версия
  */
@@ -28,6 +40,11 @@ add_action('wp', function () {
 
     $search_query = get_search_query();
     if (empty($search_query)) {
+        return;
+    }
+
+    $search_query = wp_search_logs_normalize_vin($search_query);
+    if ($search_query === '') {
         return;
     }
 
@@ -177,16 +194,17 @@ function wp_search_logs_page()
 
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
+    $vin_condition = wp_search_logs_vin_sql_condition();
 
     // Получаем статистику
-    $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table");
-    $unique_queries = (int) $wpdb->get_var("SELECT COUNT(DISTINCT query) FROM $table");
+    $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table WHERE $vin_condition");
+    $unique_queries = (int) $wpdb->get_var("SELECT COUNT(DISTINCT query) FROM $table WHERE $vin_condition");
     $today = $wpdb->get_var($wpdb->prepare(
-        "SELECT COUNT(*) FROM $table WHERE DATE(created_at) = %s",
+        "SELECT COUNT(*) FROM $table WHERE $vin_condition AND DATE(created_at) = %s",
         current_time('Y-m-d')
     ));
     $yesterday = $wpdb->get_var($wpdb->prepare(
-        "SELECT COUNT(*) FROM $table WHERE DATE(created_at) = %s",
+        "SELECT COUNT(*) FROM $table WHERE $vin_condition AND DATE(created_at) = %s",
         date('Y-m-d', strtotime('-1 day'))
     ));
 
@@ -194,6 +212,7 @@ function wp_search_logs_page()
     $top_queries = $wpdb->get_results(
         "SELECT query, COUNT(*) as count 
          FROM $table 
+         WHERE $vin_condition
          GROUP BY query 
          ORDER BY count DESC 
          LIMIT 20",
@@ -204,7 +223,7 @@ function wp_search_logs_page()
     $daily_stats = $wpdb->get_results(
         "SELECT DATE(created_at) as date, COUNT(*) as count 
          FROM $table 
-         WHERE created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+         WHERE $vin_condition AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)
          GROUP BY DATE(created_at) 
          ORDER BY date DESC",
         ARRAY_A
@@ -216,7 +235,7 @@ function wp_search_logs_page()
     $offset = ($page - 1) * $per_page;
 
     $rows = $wpdb->get_results(
-        $wpdb->prepare("SELECT created_at, query FROM $table ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset),
+        $wpdb->prepare("SELECT created_at, query FROM $table WHERE $vin_condition ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset),
         ARRAY_A
     );
 
@@ -356,13 +375,29 @@ function wp_search_logs_page()
                 $pages = max(1, ceil($total / $per_page));
                 if ($pages > 1):
                     echo '<div style="margin-top: 20px; text-align: center;">';
-                    for ($i = 1; $i <= $pages; $i++) {
+                    $pagination_pages = array_unique(array_filter([
+                        1, 2, 3,
+                        $page - 1, $page, $page + 1,
+                        $pages - 2, $pages - 1, $pages,
+                    ], function ($item) use ($pages) {
+                        return $item >= 1 && $item <= $pages;
+                    }));
+                    sort($pagination_pages, SORT_NUMERIC);
+                    $previous_page = 0;
+
+                    foreach ($pagination_pages as $i) {
+                        if ($previous_page && $i > $previous_page + 1) {
+                            echo '<span style="margin: 0 5px;">&hellip;</span>';
+                        }
+
                         $link = esc_url(add_query_arg('paged', $i, $base_url));
                         if ($i == $page) {
                             echo '<span style="margin: 0 5px; padding: 5px 10px; background: #0073aa; color: white; border-radius: 3px;">' . $i . '</span>';
                         } else {
                             echo '<a style="margin: 0 5px; padding: 5px 10px; background: #f1f1f1; color: #0073aa; text-decoration: none; border-radius: 3px;" href="' . $link . '">' . $i . '</a>';
                         }
+
+                        $previous_page = $i;
                     }
                     echo '</div>';
                 endif;
@@ -401,7 +436,8 @@ function wp_search_logs_export_csv()
 
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
-    $rows = $wpdb->get_results("SELECT created_at AS date, query FROM $table ORDER BY id ASC", ARRAY_A);
+    $vin_condition = wp_search_logs_vin_sql_condition();
+    $rows = $wpdb->get_results("SELECT created_at AS date, query FROM $table WHERE $vin_condition ORDER BY id ASC", ARRAY_A);
 
     nocache_headers();
     header('Content-Type: text/csv; charset=UTF-8');
