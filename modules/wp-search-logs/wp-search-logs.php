@@ -9,82 +9,6 @@
 
 if (!defined('ABSPATH')) exit;
 
-function mac_search_logs_record($search_query)
-{
-    if (is_user_logged_in() && current_user_can('manage_options')) {
-        return false;
-    }
-
-    $search_query = trim(wp_strip_all_tags((string) $search_query));
-    if ($search_query === '') {
-        return false;
-    }
-
-    $search_query = mb_substr($search_query, 0, 255);
-    $remote_addr = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '';
-    $session_id = md5($search_query . $remote_addr . current_time('Y-m-d H'));
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'search_logs';
-    $recent_log = $wpdb->get_var($wpdb->prepare(
-        "SELECT COUNT(*) FROM {$table} WHERE query = %s AND session_id = %s AND created_at > DATE_SUB(%s, INTERVAL 5 MINUTE)",
-        $search_query,
-        $session_id,
-        current_time('mysql')
-    ));
-
-    if ((int) $recent_log > 0) {
-        return true;
-    }
-
-    return false !== $wpdb->insert(
-        $table,
-        [
-            'created_at' => current_time('mysql'),
-            'query' => $search_query,
-            'session_id' => $session_id,
-        ],
-        ['%s', '%s', '%s']
-    );
-}
-
-add_action('rest_api_init', function () {
-    register_rest_route('master-auto-catalog/v1', '/search-log', [
-        'methods' => 'POST',
-        'callback' => function (WP_REST_Request $request) {
-            $query = $request->get_param('query');
-            if ($query === null) {
-                $body = [];
-                parse_str($request->get_body(), $body);
-                $query = $body['query'] ?? '';
-            }
-
-            mac_search_logs_record(wp_unslash($query));
-            return new WP_REST_Response(null, 204);
-        },
-        'permission_callback' => '__return_true',
-    ]);
-});
-
-add_action('wp_enqueue_scripts', function () {
-    if (is_admin()) {
-        return;
-    }
-
-    wp_enqueue_script(
-        'mac-search-logs-capture',
-        plugins_url('assets/wp-search-logs.js', __FILE__),
-        [],
-        '2.1.0',
-        true
-    );
-    wp_add_inline_script(
-        'mac-search-logs-capture',
-        'window.macSearchLogs = ' . wp_json_encode(['endpoint' => rest_url('master-auto-catalog/v1/search-log')]) . ';',
-        'before'
-    );
-});
-
 /**
  * Ловим поисковые запросы - исправленная версия
  */
@@ -145,7 +69,15 @@ add_action('wp', function () {
 		return;
 	}
 
-    mac_search_logs_record($search_query);
+    $wpdb->insert(
+        $table,
+        [
+            'created_at' => current_time('mysql'),
+            'query'      => wp_strip_all_tags($search_query),
+            'session_id' => $session_id
+        ],
+        ['%s', '%s', '%s']
+    );
 });
 
 /**
