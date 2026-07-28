@@ -163,14 +163,39 @@ class Master_Auto_Catalog_Updater
         $action = is_array($payload) && isset($payload['action']) ? sanitize_key($payload['action']) : '';
 
         $auto_update = null;
-        if ($event === 'release' && in_array($action, ['published', 'released'], true)) {
+        if ($event === 'release' && $action === 'published') {
             self::log('Webhook accepted.', ['event' => $event, 'action' => $action]);
             self::clear_cache();
-            $release = self::get_latest_release(true);
+            $release = self::release_from_webhook_payload($payload);
             $auto_update = self::install_available_update($release, 'github_webhook');
         }
 
         return new WP_REST_Response(['ok' => true, 'auto_update' => $auto_update], 200);
+    }
+
+    private static function release_from_webhook_payload($payload)
+    {
+        $release_data = is_array($payload) && isset($payload['release']) && is_array($payload['release'])
+            ? $payload['release']
+            : [];
+        $tag_name = isset($release_data['tag_name']) ? trim((string) $release_data['tag_name']) : '';
+
+        if ($tag_name === '') {
+            return false;
+        }
+
+        $release = [
+            'version' => ltrim($tag_name, 'vV'),
+            'tag' => $tag_name,
+            'name' => isset($release_data['name']) ? (string) $release_data['name'] : $tag_name,
+            'body' => isset($release_data['body']) ? (string) $release_data['body'] : '',
+            'published_at' => isset($release_data['published_at']) ? (string) $release_data['published_at'] : '',
+            'package' => self::package_url($tag_name),
+            'html_url' => isset($release_data['html_url']) ? (string) $release_data['html_url'] : self::repo_url(),
+        ];
+
+        set_site_transient(self::TRANSIENT_RELEASE, $release, self::TRANSIENT_TIMEOUT);
+        return $release;
     }
 
     public static function save_settings()
