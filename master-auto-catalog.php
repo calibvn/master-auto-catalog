@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.18
+ * Version: 1.0.19
  * Author: AskarTech
  */
 
@@ -39,6 +39,7 @@ function mac_load_modules()
 }
 
 add_action('plugins_loaded', 'mac_load_modules', 1);
+add_action('plugins_loaded', 'mac_ensure_search_logs_schema', 2);
 add_action('admin_menu', ['Master_Auto_Catalog_Admin', 'register_menu'], 20);
 add_action('admin_enqueue_scripts', ['Master_Auto_Catalog_Admin', 'enqueue_admin_assets']);
 add_action('init', ['Master_Auto_Catalog_Updater', 'init']);
@@ -105,4 +106,28 @@ function mac_create_search_logs_table()
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
     dbDelta($sql);
+}
+
+/**
+ * Plugin updates do not run the activation hook.  Older installations can
+ * therefore have a search_logs table created before session_id was added.
+ */
+function mac_ensure_search_logs_schema()
+{
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'search_logs';
+    $table_exists = (string) $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $table));
+
+    if ($table_exists !== $table) {
+        mac_create_search_logs_table();
+        return;
+    }
+
+    $table_sql = '`' . str_replace('`', '``', $table) . '`';
+    $session_id_column = $wpdb->get_var("SHOW COLUMNS FROM {$table_sql} LIKE 'session_id'");
+
+    if ($session_id_column === null) {
+        $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN session_id VARCHAR(64) DEFAULT '' AFTER query");
+    }
 }
