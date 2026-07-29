@@ -63,8 +63,12 @@ class VINFallbackSearch
     private function init_hooks()
     {
         // Основные хуки
+        add_action('template_redirect', [$this, 'maybe_redirect_hidden_product'], 0);
         add_action('template_redirect', [$this, 'maybe_handle_search_fallback'], 1);
         add_filter('vin_fallback_providers', [$this, 'get_active_providers']);
+        add_filter('woocommerce_product_query_meta_query', [$this, 'exclude_hidden_products_from_woocommerce_queries'], 20, 2);
+        add_filter('woocommerce_product_is_visible', [$this, 'exclude_hidden_product_from_visibility'], 20, 2);
+        add_action('pre_get_posts', [$this, 'exclude_hidden_products_from_main_search'], 20);
 
         // Админка
         add_action('admin_init', [$this, 'settings_init']);
@@ -331,6 +335,7 @@ class VINFallbackSearch
                 ['field' => $field]
             );
         }
+
     }
 
     public function sanitize_settings($input)
@@ -690,6 +695,209 @@ class VINFallbackSearch
     /**
      * Проверяем существование товара по SKU с правильной логикой (оптимизированная)
      */
+    private function is_redirect_hidden_product(int $product_id): bool
+    {
+        return $product_id > 0 && get_post_meta($product_id, '_mac_vin_hide_mode', true) === 'redirect';
+    }
+
+    private function is_hidden_placeholder(int $product_id): bool
+    {
+        return $product_id > 0 && get_post_meta($product_id, '_mac_vin_hidden_placeholder', true) === '1';
+    }
+
+    private function append_hidden_product_clause(array $meta_query): array
+    {
+        $hidden_clause = [
+            'key' => '_mac_vin_hide_mode',
+            'compare' => 'NOT EXISTS',
+        ];
+
+        if (empty($meta_query)) {
+            return [$hidden_clause];
+        }
+
+        return [
+            'relation' => 'AND',
+            $meta_query,
+            $hidden_clause,
+        ];
+    }
+
+    public function exclude_hidden_products_from_woocommerce_queries($meta_query, $query)
+    {
+        if (is_admin()) {
+            return $meta_query;
+        }
+
+        return $this->append_hidden_product_clause(is_array($meta_query) ? $meta_query : []);
+    }
+
+    public function exclude_hidden_product_from_visibility($visible, $product_id)
+    {
+        if (is_admin() || !$visible) {
+            return $visible;
+        }
+
+        return !$this->is_redirect_hidden_product((int)$product_id);
+    }
+
+    public function exclude_hidden_products_from_main_search($query)
+    {
+        if (is_admin() || !$query->is_main_query() || !$query->is_search()) {
+            return;
+        }
+
+        $query->set('meta_query', $this->append_hidden_product_clause((array)$query->get('meta_query')));
+    }
+
+    public function maybe_redirect_hidden_product()
+    {
+        if (is_admin() || !is_singular('product')) {
+            return;
+        }
+
+        $product_id = (int)get_queried_object_id();
+        if (!$this->is_redirect_hidden_product($product_id)) {
+            return;
+        }
+
+        if (!headers_sent()) {
+            header('X-Robots-Tag: noindex', true);
+        }
+
+        wp_safe_redirect(home_url('/'), 302);
+        exit;
+    }
+
+    public function hide_product(int $product_id, string $hide_mode = 'draft')
+    {
+        if ($product_id <= 0 || get_post_type($product_id) !== 'product') {
+            return new WP_Error('invalid_product', 'Invalid product ID', ['status' => 400]);
+        }
+
+        $hide_mode = $hide_mode === 'redirect' ? 'redirect' : 'draft';
+
+        if ($this->is_hidden_placeholder($product_id)) {
+            delete_post_meta($product_id, '_mac_vin_hide_mode');
+
+            if (get_post_status($product_id) !== 'draft') {
+                $updated = wp_update_post([
+                    'ID' => $product_id,
+                    'post_status' => 'draft',
+                ], true);
+                if (is_wp_error($updated)) {
+                    return $updated;
+                }
+            }
+
+            return [
+                'success' => true,
+                'message' => 'Vehicle placeholder remains in draft',
+                'product_id' => $product_id,
+                'status' => 'draft',
+                'hide_mode' => 'draft',
+                'placeholder' => true,
+                'url' => get_permalink($product_id),
+            ];
+        }
+
+        if ($hide_mode === 'redirect') {
+            update_post_meta($product_id, '_mac_vin_hide_mode', 'redirect');
+
+            if (get_post_status($product_id) !== 'publish') {
+                $updated = wp_update_post([
+                    'ID' => $product_id,
+                    'post_status' => 'publish',
+                ], true);
+                if (is_wp_error($updated)) {
+                    return $updated;
+                }
+            }
+
+            return [
+                'success' => true,
+                'message' => 'Vehicle hidden with redirect',
+                'product_id' => $product_id,
+                'status' => 'publish',
+                'hide_mode' => 'redirect',
+                'url' => get_permalink($product_id),
+            ];
+        }
+
+        delete_post_meta($product_id, '_mac_vin_hide_mode');
+
+        if (get_post_status($product_id) === 'draft') {
+            return [
+                'success' => true,
+                'message' => 'Vehicle already in draft',
+                'product_id' => $product_id,
+                'status' => 'draft',
+                'hide_mode' => 'draft',
+                'url' => get_permalink($product_id),
+                'already_in_draft' => true,
+            ];
+        }
+
+        $updated = wp_update_post([
+            'ID' => $product_id,
+            'post_status' => 'draft',
+        ], true);
+
+        if (is_wp_error($updated)) {
+            return $updated;
+        }
+
+        return [
+            'success' => true,
+            'message' => 'Vehicle moved to draft',
+            'product_id' => $product_id,
+            'status' => 'draft',
+            'hide_mode' => 'draft',
+            'url' => get_permalink($product_id),
+            'already_in_draft' => false,
+        ];
+    }
+
+    public function create_hidden_placeholder(string $vin)
+    {
+        $vin = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', trim($vin)));
+        if (!$this->is_valid_vin($vin)) {
+            return new WP_Error('invalid_vin', 'Invalid VIN format', ['status' => 400]);
+        }
+
+        $existing_id = $this->get_product_id_by_sku_any_status($vin);
+        if ($existing_id > 0) {
+            return $this->hide_product($existing_id);
+        }
+
+        $product_id = wp_insert_post([
+            'post_title' => $vin,
+            'post_name' => sanitize_title($vin),
+            'post_status' => 'draft',
+            'post_type' => 'product',
+        ], true);
+
+        if (is_wp_error($product_id)) {
+            return $product_id;
+        }
+
+        $product_id = (int)$product_id;
+        update_post_meta($product_id, '_sku', $vin);
+        update_post_meta($product_id, '_mac_vin_hidden_placeholder', '1');
+        wp_set_object_terms($product_id, 'simple', 'product_type', false);
+        $this->clear_product_cache($vin);
+
+        return [
+            'success' => true,
+            'message' => 'Vehicle placeholder created in draft',
+            'product_id' => $product_id,
+            'status' => 'draft',
+            'hide_mode' => 'draft',
+            'placeholder' => true,
+            'url' => get_permalink($product_id),
+        ];
+    }
+
     protected function check_existing_product($sku)
     {
         // Проверяем внутренний кэш
@@ -1095,6 +1303,11 @@ class VINFallbackSearch
         }
 
         if ($existing_product !== null) {
+            if ($this->is_redirect_hidden_product((int)$existing_product)) {
+                if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists but is hidden with redirect - show "nothing found"');
+                return;
+            }
+
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists and published: #' . $existing_product . ' - redirecting');
             wp_safe_redirect(get_permalink($existing_product), 302);
             exit;
@@ -1166,6 +1379,10 @@ class VINFallbackSearch
         }
 
         if ($existing_product !== null) {
+            if ($this->is_redirect_hidden_product((int)$existing_product)) {
+                return ['success' => false, 'message' => 'Vehicle exists but is hidden'];
+            }
+
             $modified_gmt = get_post_field('post_modified_gmt', (int)$existing_product);
 
             return [
@@ -1246,6 +1463,10 @@ class VINFallbackSearch
         $existing_product = $this->check_existing_product($sku);
 
         if ($existing_product && $existing_product !== false) {
+            if ($this->is_redirect_hidden_product((int)$existing_product)) {
+                return 0;
+            }
+
             return (int) $existing_product;
         }
 

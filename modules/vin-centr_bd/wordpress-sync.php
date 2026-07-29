@@ -519,12 +519,25 @@ function cas_api_import_vehicle($request)
 
 function cas_find_product_by_vin($vin)
 {
+    global $wpdb;
+
     $vin_norm = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', trim((string)$vin)));
     if ($vin_norm === '') {
         return 0;
     }
 
-    return (int)wc_get_product_id_by_sku($vin_norm);
+    return (int)$wpdb->get_var(
+        $wpdb->prepare(
+            "SELECT p.ID
+             FROM {$wpdb->posts} p
+             INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID
+             WHERE p.post_type = 'product'
+               AND pm.meta_key = '_sku'
+               AND pm.meta_value = %s
+             LIMIT 1",
+            $vin_norm
+        )
+    );
 }
 
 function cas_move_product_to_draft($product_id)
@@ -569,6 +582,16 @@ function cas_move_product_to_draft($product_id)
     ];
 }
 
+function cas_hide_product($product_id, $hide_mode = 'draft')
+{
+    $vin_fallback = $GLOBALS['mac_vin_fallback'] ?? null;
+    if ($vin_fallback && method_exists($vin_fallback, 'hide_product')) {
+        return $vin_fallback->hide_product((int)$product_id, $hide_mode);
+    }
+
+    return cas_move_product_to_draft($product_id);
+}
+
 function cas_api_hide_vehicle($request)
 {
     if (!class_exists('WooCommerce')) {
@@ -577,6 +600,7 @@ function cas_api_hide_vehicle($request)
 
     $data = $request->get_json_params();
     $vin = $data['vin'] ?? '';
+    $hide_mode = isset($data['hide_mode']) && $data['hide_mode'] === 'redirect' ? 'redirect' : 'draft';
 
     if (!$vin) {
         return new WP_Error('missing_vin', 'VIN is required', ['status' => 400]);
@@ -589,7 +613,7 @@ function cas_api_hide_vehicle($request)
 
     $existing_id = cas_find_product_by_vin($vin_norm);
     if ($existing_id) {
-        $hide_result = cas_move_product_to_draft($existing_id);
+        $hide_result = cas_hide_product($existing_id, $hide_mode);
         if (is_wp_error($hide_result)) {
             return [
                 'success' => false,
@@ -606,34 +630,25 @@ function cas_api_hide_vehicle($request)
 
     $vinFallback = $GLOBALS['mac_vin_fallback'] ?? null;
 
-    if (!$vinFallback || !method_exists($vinFallback, 'import_by_vin')) {
-        return ['success' => false, 'message' => 'VINFallbackSearch::import_by_vin not found'];
+    if (!$vinFallback || !method_exists($vinFallback, 'create_hidden_placeholder')) {
+        return ['success' => false, 'message' => 'VINFallbackSearch::create_hidden_placeholder not found'];
     }
 
-    $import_result = $vinFallback->import_by_vin($vin_norm);
-    if (!is_array($import_result)) {
-        return ['success' => false, 'message' => 'Invalid import result'];
-    }
-
-    if (empty($import_result['product_id'])) {
+    $placeholder_result = $vinFallback->create_hidden_placeholder($vin_norm);
+    if (is_wp_error($placeholder_result)) {
         return [
             'success' => false,
-            'message' => $import_result['message'] ?? 'Import failed',
+            'message' => $placeholder_result->get_error_message(),
         ];
     }
 
-    $product_id = (int)$import_result['product_id'];
-    $hide_result = cas_move_product_to_draft($product_id);
-    if (is_wp_error($hide_result)) {
+    if (!is_array($placeholder_result) || empty($placeholder_result['product_id'])) {
         return [
             'success' => false,
-            'message' => $hide_result->get_error_message(),
-            'product_id' => $product_id,
+            'message' => is_array($placeholder_result) ? ($placeholder_result['message'] ?? 'Placeholder creation failed') : 'Invalid placeholder result',
         ];
     }
 
-    $hide_result['message'] = 'Vehicle imported and moved to draft';
-    $hide_result['imported'] = true;
-
-    return $hide_result;
+    $placeholder_result['created_placeholder'] = true;
+    return $placeholder_result;
 }
