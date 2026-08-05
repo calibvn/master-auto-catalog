@@ -21,6 +21,41 @@ function wp_search_logs_vin_sql_condition()
     return "CHAR_LENGTH(query) = 17 AND UPPER(query) REGEXP '^[A-HJ-NPR-Z0-9]{17}$'";
 }
 
+function wp_search_logs_vin_result_label($result)
+{
+    $labels = [
+        'existing' => 'VIN был на сайте',
+        'created' => 'VIN создался',
+        'not_found' => 'VIN не найден',
+        'creation_error' => 'Ошибка создания',
+    ];
+
+    return $labels[$result] ?? '—';
+}
+
+function wp_search_logs_update_vin_result($result, $vin)
+{
+    $allowed_results = ['existing', 'created', 'not_found', 'creation_error'];
+    if (!in_array($result, $allowed_results, true)) {
+        return;
+    }
+
+    $context = $GLOBALS['mac_search_logs_current_request'] ?? null;
+    if (!is_array($context) || empty($context['id']) || ($context['vin'] ?? '') !== $vin) {
+        return;
+    }
+
+    global $wpdb;
+    $wpdb->update(
+        $wpdb->prefix . 'search_logs',
+        ['vin_result' => $result],
+        ['id' => (int) $context['id']],
+        ['%s'],
+        ['%d']
+    );
+}
+add_action('mac_vin_fallback_search_result', 'wp_search_logs_update_vin_result', 10, 2);
+
 const MAC_SEARCH_LOGS_TELEGRAM_OPTION = 'mac_search_logs_telegram_settings';
 const MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK = 'mac_search_logs_telegram_daily';
 const MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK = 'mac_search_logs_telegram_weekly';
@@ -67,7 +102,8 @@ function mac_search_logs_telegram_send(DateTimeInterface $start, DateTimeInterfa
     $table = $wpdb->prefix . 'search_logs';
     $vin_condition = wp_search_logs_vin_sql_condition();
     $rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT query, COUNT(*) AS count
+        "SELECT query, COUNT(*) AS count,
+                SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(vin_result, '') ORDER BY id DESC SEPARATOR ','), ',', 1) AS vin_result
          FROM {$table}
          WHERE {$vin_condition} AND created_at >= %s AND created_at < %s
          GROUP BY query
@@ -83,7 +119,7 @@ function mac_search_logs_telegram_send(DateTimeInterface $start, DateTimeInterfa
     $host = wp_parse_url(home_url(), PHP_URL_HOST) ?: home_url();
     $lines = [$host];
     foreach ($rows as $row) {
-        $lines[] = $row['query'] . ' - ' . (int) $row['count'];
+        $lines[] = $row['query'] . ' - ' . (int) $row['count'] . ' - ' . wp_search_logs_vin_result_label((string) ($row['vin_result'] ?? ''));
     }
 
     $body = [
@@ -206,7 +242,10 @@ add_action('wp', function () {
 
 
     // Создаем уникальный идентификатор сессии для этого запроса
-    $session_id = md5($search_query . $_SERVER['REMOTE_ADDR'] . current_time('Y-m-d H'));
+    $ip_address = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+    $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'])) : '';
+    $user_agent = substr($user_agent, 0, 2048);
+    $session_id = md5($search_query . $ip_address . current_time('Y-m-d H'));
 
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
@@ -236,10 +275,20 @@ add_action('wp', function () {
         [
             'created_at' => current_time('mysql'),
             'query'      => wp_strip_all_tags($search_query),
-            'session_id' => $session_id
+            'session_id' => $session_id,
+            'ip_address' => $ip_address,
+            'user_agent' => $user_agent,
+            'vin_result' => '',
         ],
-        ['%s', '%s', '%s']
+        ['%s', '%s', '%s', '%s', '%s', '%s']
     );
+
+    if ($wpdb->insert_id) {
+        $GLOBALS['mac_search_logs_current_request'] = [
+            'id' => (int) $wpdb->insert_id,
+            'vin' => $search_query,
+        ];
+    }
 });
 
 /**
@@ -380,7 +429,7 @@ function wp_search_logs_page()
     $offset = ($page - 1) * $per_page;
 
     $rows = $wpdb->get_results(
-        $wpdb->prepare("SELECT created_at, query FROM $table WHERE $vin_condition ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset),
+        $wpdb->prepare("SELECT created_at, query, ip_address, user_agent, vin_result FROM $table WHERE $vin_condition ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, $offset),
         ARRAY_A
     );
 
@@ -550,6 +599,9 @@ function wp_search_logs_page()
                         <tr>
                             <th style="width:200px;">Дата и время</th>
                             <th>Поисковый запрос</th>
+                            <th style="width:150px;">IP</th>
+                            <th>User-Agent</th>
+                            <th style="width:170px;">Результат VIN</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -557,11 +609,14 @@ function wp_search_logs_page()
                                 <tr>
                                     <td><?php echo esc_html(date('d.m.Y H:i', strtotime($r['created_at']))); ?></td>
                                     <td><?php echo esc_html($r['query']); ?></td>
+                                    <td><?php echo esc_html($r['ip_address'] ?: '—'); ?></td>
+                                    <td style="word-break: break-word;"><?php echo esc_html($r['user_agent'] ?: '—'); ?></td>
+                                    <td><?php echo esc_html(wp_search_logs_vin_result_label((string) $r['vin_result'])); ?></td>
                                 </tr>
                             <?php endforeach;
                         else: ?>
                             <tr>
-                                <td colspan="2">Пока пусто. Сделайте поиск на фронте (/?s=что-нибудь).</td>
+                                <td colspan="5">Пока пусто. Сделайте поиск на фронте (/?s=что-нибудь).</td>
                             </tr>
                         <?php endif; ?>
                     </tbody>
@@ -634,7 +689,7 @@ function wp_search_logs_export_csv()
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
     $vin_condition = wp_search_logs_vin_sql_condition();
-    $rows = $wpdb->get_results("SELECT created_at AS date, query FROM $table WHERE $vin_condition ORDER BY id ASC", ARRAY_A);
+    $rows = $wpdb->get_results("SELECT created_at AS date, query, ip_address, user_agent, vin_result FROM $table WHERE $vin_condition ORDER BY id ASC", ARRAY_A);
 
     nocache_headers();
     header('Content-Type: text/csv; charset=UTF-8');
@@ -642,10 +697,10 @@ function wp_search_logs_export_csv()
 
     $out = fopen('php://output', 'w');
     // заголовок
-    fputcsv($out, ['date', 'query']);
+    fputcsv($out, ['date', 'query', 'ip_address', 'user_agent', 'vin_result']);
     if ($rows) {
         foreach ($rows as $r) {
-            fputcsv($out, [$r['date'], $r['query']]);
+            fputcsv($out, [$r['date'], $r['query'], $r['ip_address'], $r['user_agent'], wp_search_logs_vin_result_label((string) $r['vin_result'])]);
         }
     }
     fclose($out);

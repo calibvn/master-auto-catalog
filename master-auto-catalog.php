@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.24
+ * Version: 1.0.25
  * Author: AskarTech
  */
 
@@ -100,10 +100,14 @@ function mac_create_search_logs_table()
         created_at DATETIME NOT NULL,
         query VARCHAR(255) NOT NULL,
         session_id VARCHAR(64) DEFAULT '',
+        ip_address VARCHAR(45) DEFAULT '',
+        user_agent TEXT NULL,
+        vin_result VARCHAR(32) DEFAULT '',
         PRIMARY KEY  (id),
         KEY created_at (created_at),
         KEY query (query),
-        KEY session_id (session_id)
+        KEY session_id (session_id),
+        KEY vin_result (vin_result)
     ) $charset_collate;";
 
     require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -131,5 +135,23 @@ function mac_ensure_search_logs_schema()
 
     if ($session_id_column === null) {
         $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN session_id VARCHAR(64) DEFAULT '' AFTER query");
+    }
+
+    $columns = [
+        'ip_address' => "VARCHAR(45) DEFAULT '' AFTER session_id",
+        'user_agent' => 'TEXT NULL AFTER ip_address',
+        'vin_result' => "VARCHAR(32) DEFAULT '' AFTER user_agent",
+    ];
+
+    foreach ($columns as $column => $definition) {
+        $exists = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$table_sql} LIKE %s", $column));
+        if ($exists === null) {
+            $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN {$column} {$definition}");
+        }
+    }
+
+    $result_index = $wpdb->get_var("SHOW INDEX FROM {$table_sql} WHERE Key_name = 'vin_result'");
+    if ($result_index === null) {
+        $wpdb->query("ALTER TABLE {$table_sql} ADD KEY vin_result (vin_result)");
     }
 }

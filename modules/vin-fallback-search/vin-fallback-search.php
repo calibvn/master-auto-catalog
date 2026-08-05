@@ -1278,13 +1278,17 @@ class VINFallbackSearch
 
         // 1) Если штатный поиск что-то нашёл — уходим
         if (intval($wp_query->found_posts) > 0) {
+            $found_vin = strtoupper(preg_replace('/[\s-]+/', '', get_search_query()));
+            if ($this->is_valid_vin($found_vin)) {
+                do_action('mac_vin_fallback_search_result', 'existing', $found_vin);
+            }
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] WooCommerce found products - exit');
             return;
         }
 
         // Пробуем интерпретировать строку поиска как VIN
         $raw_q = get_search_query();
-        $q = strtoupper(preg_replace('/\s+/', '', $raw_q));
+        $q = strtoupper(preg_replace('/[\s-]+/', '', $raw_q));
 
         // Оптимизированная проверка VIN
         if (!$this->is_valid_vin($q)) {
@@ -1298,11 +1302,13 @@ class VINFallbackSearch
         $existing_product = $this->check_existing_product($q);
 
         if ($existing_product === false) {
+            do_action('mac_vin_fallback_search_result', 'existing', $q);
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists but is draft - show "nothing found"');
             return;
         }
 
         if ($existing_product !== null) {
+            do_action('mac_vin_fallback_search_result', 'existing', $q);
             if ($this->is_redirect_hidden_product((int)$existing_product)) {
                 if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists but is hidden with redirect - show "nothing found"');
                 return;
@@ -1317,6 +1323,7 @@ class VINFallbackSearch
         $providers = apply_filters('vin_fallback_providers', []);
 
         if (empty($providers)) {
+            do_action('mac_vin_fallback_search_result', 'not_found', $q);
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] No active providers - show "nothing found"');
             return;
         }
@@ -1324,6 +1331,7 @@ class VINFallbackSearch
         if (VIN_FS_DEBUG) error_log('[VIN Fallback] Starting API search with ' . count($providers) . ' providers');
 
         // Последовательно опрашиваем API провайдеры
+        $creation_failed = false;
         foreach ($providers as $index => $provider) {
             $provider_class = get_class($provider);
             $provider_name = $provider_class;
@@ -1337,13 +1345,16 @@ class VINFallbackSearch
                     if (VIN_FS_DEBUG) error_log('[VIN Fallback] Provider ' . $provider_name . ' found vehicle');
 
                     // Создаем товар и редиректим (передаем класс провайдера)
-                    $product_id = $this->create_or_get_product($item, $provider_class);
+                    $was_created = false;
+                    $product_id = $this->create_or_get_product($item, $provider_class, $was_created);
 
                     if ($product_id) {
+                        do_action('mac_vin_fallback_search_result', $was_created ? 'created' : 'existing', $q);
                         if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product created: #' . $product_id . ' - redirecting');
                         wp_safe_redirect(get_permalink($product_id), 302);
                         exit;
                     } else {
+                        $creation_failed = true;
                         if (VIN_FS_DEBUG) error_log('[VIN Fallback] Failed to create product from provider: ' . $provider_name);
                     }
                 } else {
@@ -1354,6 +1365,7 @@ class VINFallbackSearch
             }
         }
 
+        do_action('mac_vin_fallback_search_result', $creation_failed ? 'creation_error' : 'not_found', $q);
         if (VIN_FS_DEBUG) error_log('[VIN Fallback] No providers found vehicle - show "nothing found"');
         return;
     }
@@ -1454,8 +1466,9 @@ class VINFallbackSearch
     /**
      * Создаёт (или возвращает) товар WooCommerce с меткой провайдера
      */
-    protected function create_or_get_product(array $item, $provider_class = null): int
+    protected function create_or_get_product(array $item, $provider_class = null, &$was_created = false): int
     {
+        $was_created = false;
         $sku = sanitize_text_field($item['sku'] ?? '');
         if (!$sku) return 0;
 
@@ -1475,7 +1488,9 @@ class VINFallbackSearch
         }
 
         // Создаем новый товар с меткой провайдера
-        return $this->create_new_product($item, $provider_class);
+        $product_id = $this->create_new_product($item, $provider_class);
+        $was_created = $product_id > 0;
+        return $product_id;
     }
 
     public function ajax_test_provider()
