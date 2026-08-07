@@ -52,6 +52,11 @@ function mac_sitemap_logs_detect_bot($user_agent)
     return preg_match('/bot|crawler|spider|slurp|archiver/i', $user_agent) ? 'Другой бот' : 'Посетитель';
 }
 
+function mac_sitemap_logs_is_ignored_user_agent($user_agent)
+{
+    return stripos((string) $user_agent, 'AccelerateWP/Preload') !== false;
+}
+
 function mac_sitemap_logs_begin_request()
 {
     if (isset($GLOBALS['mac_sitemap_logs_current_request'])) return;
@@ -62,15 +67,17 @@ function mac_sitemap_logs_begin_request()
     $request_uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
     $request_path = wp_parse_url($request_uri, PHP_URL_PATH);
     if (!is_string($request_path) || $request_path === '') return;
+    $user_agent = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
 
     if (!mac_sitemap_logs_is_xml_request($request_path)) return;
+    if (mac_sitemap_logs_is_ignored_user_agent($user_agent)) return;
 
     $GLOBALS['mac_sitemap_logs_current_request'] = [
         'sitemap_path' => mac_sitemap_logs_normalize_path($request_path),
         'request_uri' => substr(sanitize_text_field(wp_unslash($request_uri)), 0, 2048),
         'request_method' => $method,
         'ip_address' => substr(sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'] ?? '')), 0, 45),
-        'user_agent' => substr(sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 2048),
+        'user_agent' => substr(sanitize_text_field(wp_unslash($user_agent)), 0, 2048),
         'referer' => substr(esc_url_raw(wp_unslash($_SERVER['HTTP_REFERER'] ?? '')), 0, 2048),
         'user_id' => get_current_user_id(),
     ];
@@ -86,10 +93,12 @@ function mac_crawler_logs_begin_request()
 
     $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     if (!in_array($method, ['GET', 'HEAD'], true)) return;
+    $user_agent = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
+    if (mac_sitemap_logs_is_ignored_user_agent($user_agent)) return;
 
     $GLOBALS['mac_crawler_logs_current_request'] = [
         'ip_address' => substr(sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'] ?? '')), 0, 45),
-        'user_agent' => substr(sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 2048),
+        'user_agent' => substr(sanitize_text_field(wp_unslash($user_agent)), 0, 2048),
         'request_uri' => substr(sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI'] ?? '')), 0, 2048),
     ];
 
@@ -169,11 +178,12 @@ function mac_sitemap_logs_send_report(DateTimeInterface $start, DateTimeInterfac
     $summary = $wpdb->get_results($wpdb->prepare(
         "SELECT sitemap_path, bot_name, COUNT(*) AS count
          FROM {$table}
-         WHERE created_at >= %s AND created_at < %s
+         WHERE created_at >= %s AND created_at < %s AND user_agent NOT LIKE %s
          GROUP BY sitemap_path, bot_name
          ORDER BY sitemap_path ASC, count DESC, bot_name ASC",
         $start->format('Y-m-d H:i:s'),
-        $end->format('Y-m-d H:i:s')
+        $end->format('Y-m-d H:i:s'),
+        '%AccelerateWP/Preload%'
     ), ARRAY_A);
 
     if (!$summary) return ['status' => 'empty'];
@@ -221,7 +231,10 @@ function mac_sitemap_logs_export_csv()
     if (!current_user_can('manage_options')) return;
     global $wpdb;
 
-    $rows = $wpdb->get_results("SELECT created_at, sitemap_path, request_uri, request_method, response_code, ip_address, bot_name, referer, user_agent, user_id FROM {$wpdb->prefix}sitemap_logs ORDER BY id ASC", ARRAY_A);
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT created_at, sitemap_path, request_uri, request_method, response_code, ip_address, bot_name, referer, user_agent, user_id FROM {$wpdb->prefix}sitemap_logs WHERE user_agent NOT LIKE %s ORDER BY id ASC",
+        '%AccelerateWP/Preload%'
+    ), ARRAY_A);
     nocache_headers();
     header('Content-Type: text/csv; charset=UTF-8');
     header('Content-Disposition: attachment; filename=sitemap-log-' . date('Y-m-d') . '.csv');
@@ -238,10 +251,10 @@ function mac_sitemap_logs_render_admin_table()
     $table = $wpdb->prefix . 'sitemap_logs';
     $per_page = 50;
     $page = max(1, (int) ($_GET['sitemap_paged'] ?? 1));
-    $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+    $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE user_agent NOT LIKE %s", '%AccelerateWP/Preload%'));
     $pages = max(1, (int) ceil($total / $per_page));
     $page = min($page, $pages);
-    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, ($page - 1) * $per_page), ARRAY_A);
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE user_agent NOT LIKE %s ORDER BY id DESC LIMIT %d OFFSET %d", '%AccelerateWP/Preload%', $per_page, ($page - 1) * $per_page), ARRAY_A);
     $base_url = admin_url('admin.php?page=wp-search-logs');
     ?>
     <div class="postbox" style="margin:20px 0;background:white;border:1px solid #ccd0d4;border-radius:4px;">
@@ -291,12 +304,13 @@ function mac_crawler_logs_render_admin_table()
     $per_page = 50;
     $page = max(1, (int) ($_GET['crawler_paged'] ?? 1));
     $threshold = MAC_CRAWLER_LOGS_DAILY_THRESHOLD;
-    $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE request_count >= %d", $threshold));
+    $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE request_count >= %d AND user_agent NOT LIKE %s", $threshold, '%AccelerateWP/Preload%'));
     $pages = max(1, (int) ceil($total / $per_page));
     $page = min($page, $pages);
     $rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE request_count >= %d ORDER BY log_date DESC, request_count DESC, last_seen DESC LIMIT %d OFFSET %d",
+        "SELECT * FROM {$table} WHERE request_count >= %d AND user_agent NOT LIKE %s ORDER BY log_date DESC, request_count DESC, last_seen DESC LIMIT %d OFFSET %d",
         $threshold,
+        '%AccelerateWP/Preload%',
         $per_page,
         ($page - 1) * $per_page
     ), ARRAY_A);
