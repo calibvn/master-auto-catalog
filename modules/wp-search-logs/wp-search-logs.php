@@ -9,6 +9,8 @@
 
 if (!defined('ABSPATH')) exit;
 
+require_once __DIR__ . '/sitemap-logs.php';
+
 function wp_search_logs_normalize_vin($search_query)
 {
     $vin = strtoupper(preg_replace('/[\s-]+/', '', trim((string) $search_query)));
@@ -66,6 +68,7 @@ function mac_search_logs_telegram_settings()
         'bot_token' => '',
         'chat_id' => '-1003180903998',
         'topic_id' => '264801',
+        'sitemap_topic_id' => '27659',
         'daily_enabled' => '1',
         'weekly_enabled' => '1',
     ]);
@@ -156,6 +159,7 @@ add_action(MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK, function () {
     if ($settings['daily_enabled'] === '1') {
         $end = new DateTimeImmutable('today', wp_timezone());
         mac_search_logs_telegram_send($end->modify('-1 day'), $end);
+        mac_sitemap_logs_send_report($end->modify('-1 day'), $end);
     }
 });
 
@@ -165,6 +169,7 @@ add_action(MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK, function () {
         $today = new DateTimeImmutable('today', wp_timezone());
         $end = $today->modify('-' . ((int) $today->format('N') - 1) . ' days');
         mac_search_logs_telegram_send($end->modify('-7 days'), $end);
+        mac_sitemap_logs_send_report($end->modify('-7 days'), $end);
     }
 });
 
@@ -181,6 +186,7 @@ add_action('admin_post_mac_search_logs_save_telegram', function () {
         'bot_token' => $token !== '' ? sanitize_text_field($token) : $current['bot_token'],
         'chat_id' => preg_replace('/[^0-9-]/', '', (string) wp_unslash($_POST['chat_id'] ?? '')),
         'topic_id' => preg_replace('/[^0-9]/', '', (string) wp_unslash($_POST['topic_id'] ?? '')),
+        'sitemap_topic_id' => preg_replace('/[^0-9]/', '', (string) wp_unslash($_POST['sitemap_topic_id'] ?? $current['sitemap_topic_id'])),
         'daily_enabled' => isset($_POST['daily_enabled']) ? '1' : '0',
         'weekly_enabled' => isset($_POST['weekly_enabled']) ? '1' : '0',
     ], false);
@@ -386,6 +392,11 @@ function wp_search_logs_page()
         return;
     }
 
+    if (isset($_GET['sitemap_export']) && $_GET['sitemap_export'] === 'csv') {
+        mac_sitemap_logs_export_csv();
+        return;
+    }
+
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
     $vin_condition = wp_search_logs_vin_sql_condition();
@@ -437,6 +448,8 @@ function wp_search_logs_page()
     $telegram_settings = mac_search_logs_telegram_settings();
     $telegram_result = get_transient('mac_search_logs_telegram_result_' . get_current_user_id());
     delete_transient('mac_search_logs_telegram_result_' . get_current_user_id());
+    $sitemap_telegram_result = get_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
+    delete_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
 ?>
     <div class="wrap">
         <h1>Search Logs</h1>
@@ -450,6 +463,13 @@ function wp_search_logs_page()
             <div class="notice notice-info"><p>За сегодня нет VIN-поисков. Отчёт не отправлен.</p></div>
         <?php elseif ($telegram_result && $telegram_result['status'] === 'error'): ?>
             <div class="notice notice-error"><p><?php echo esc_html($telegram_result['message']); ?></p></div>
+        <?php endif; ?>
+        <?php if ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'sent'): ?>
+            <div class="notice notice-success is-dismissible"><p>Отчёт по карте сайта отправлен.</p></div>
+        <?php elseif ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'empty'): ?>
+            <div class="notice notice-info"><p>За сегодня не было просмотров карты сайта. Отчёт не отправлен.</p></div>
+        <?php elseif ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'error'): ?>
+            <div class="notice notice-error"><p><?php echo esc_html($sitemap_telegram_result['message']); ?></p></div>
         <?php endif; ?>
 
         <div class="postbox" style="margin: 20px 0; background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
@@ -472,6 +492,10 @@ function wp_search_logs_page()
                             <td><input id="search-logs-tg-topic" type="text" name="topic_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['topic_id']); ?>"></td>
                         </tr>
                         <tr>
+                            <th scope="row"><label for="search-logs-sitemap-topic">Topic ID карты сайта</label></th>
+                            <td><input id="search-logs-sitemap-topic" type="text" name="sitemap_topic_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['sitemap_topic_id']); ?>"></td>
+                        </tr>
+                        <tr>
                             <th scope="row">Автоматические отчёты</th>
                             <td>
                                 <label><input type="checkbox" name="daily_enabled" value="1" <?php checked($telegram_settings['daily_enabled'], '1'); ?>> Каждый день</label><br>
@@ -486,6 +510,11 @@ function wp_search_logs_page()
                     <?php wp_nonce_field('mac_search_logs_send_telegram'); ?>
                     <input type="hidden" name="action" value="mac_search_logs_send_telegram">
                     <?php submit_button('Отправить отчёт за сегодня', 'secondary'); ?>
+                </form>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                    <?php wp_nonce_field('mac_sitemap_logs_send_telegram'); ?>
+                    <input type="hidden" name="action" value="mac_sitemap_logs_send_telegram">
+                    <?php submit_button('Отправить отчёт по карте сайта за сегодня', 'secondary'); ?>
                 </form>
             </div>
         </div>
@@ -656,6 +685,9 @@ function wp_search_logs_page()
                 ?>
             </div>
         </div>
+
+        <?php mac_sitemap_logs_render_admin_table(); ?>
+        <?php mac_crawler_logs_render_admin_table(); ?>
 
         <!-- Кнопка экспорта -->
         <p><a class="button button-primary" href="<?php echo esc_url($base_url . '&export=csv'); ?>">Скачать CSV со всеми данными</a></p>

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.25
+ * Version: 1.0.26
  * Author: AskarTech
  */
 
@@ -50,6 +50,8 @@ register_deactivation_hook(__FILE__, 'mac_deactivate');
 function mac_activate()
 {
     mac_create_search_logs_table();
+    mac_create_sitemap_logs_table();
+    mac_create_crawler_logs_table();
 
     if (!function_exists('gai_activate')) {
         mac_load_modules();
@@ -86,6 +88,62 @@ function mac_deactivate()
     wp_clear_scheduled_hook('cryptocloud_check_pending_payments');
     wp_clear_scheduled_hook('mac_search_logs_telegram_daily');
     wp_clear_scheduled_hook('mac_search_logs_telegram_weekly');
+}
+
+function mac_create_sitemap_logs_table()
+{
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'sitemap_logs';
+    $charset_collate = $wpdb->get_charset_collate();
+    $sql = "CREATE TABLE IF NOT EXISTS $table (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        created_at DATETIME NOT NULL,
+        sitemap_path VARCHAR(255) NOT NULL,
+        request_uri TEXT NULL,
+        request_method VARCHAR(10) NOT NULL DEFAULT 'GET',
+        response_code SMALLINT UNSIGNED NULL,
+        ip_address VARCHAR(45) DEFAULT '',
+        user_agent TEXT NULL,
+        bot_name VARCHAR(100) DEFAULT '',
+        referer TEXT NULL,
+        user_id BIGINT UNSIGNED NULL,
+        PRIMARY KEY (id),
+        KEY created_at (created_at),
+        KEY sitemap_path (sitemap_path),
+        KEY bot_name (bot_name),
+        KEY ip_address (ip_address)
+    ) $charset_collate;";
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta($sql);
+}
+
+function mac_create_crawler_logs_table()
+{
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'crawler_logs';
+    $charset_collate = $wpdb->get_charset_collate();
+    $sql = "CREATE TABLE IF NOT EXISTS $table (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        log_date DATE NOT NULL,
+        ip_address VARCHAR(45) NOT NULL,
+        bot_name VARCHAR(100) DEFAULT '',
+        user_agent TEXT NULL,
+        request_count BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        first_seen DATETIME NOT NULL,
+        last_seen DATETIME NOT NULL,
+        last_request_uri TEXT NULL,
+        last_response_code SMALLINT UNSIGNED NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY daily_ip (log_date, ip_address),
+        KEY log_date (log_date),
+        KEY request_count (request_count)
+    ) $charset_collate;";
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta($sql);
 }
 
 function mac_create_search_logs_table()
@@ -127,31 +185,33 @@ function mac_ensure_search_logs_schema()
 
     if ($table_exists !== $table) {
         mac_create_search_logs_table();
-        return;
-    }
+    } else {
+        $table_sql = '`' . str_replace('`', '``', $table) . '`';
+        $session_id_column = $wpdb->get_var("SHOW COLUMNS FROM {$table_sql} LIKE 'session_id'");
 
-    $table_sql = '`' . str_replace('`', '``', $table) . '`';
-    $session_id_column = $wpdb->get_var("SHOW COLUMNS FROM {$table_sql} LIKE 'session_id'");
+        if ($session_id_column === null) {
+            $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN session_id VARCHAR(64) DEFAULT '' AFTER query");
+        }
 
-    if ($session_id_column === null) {
-        $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN session_id VARCHAR(64) DEFAULT '' AFTER query");
-    }
+        $columns = [
+            'ip_address' => "VARCHAR(45) DEFAULT '' AFTER session_id",
+            'user_agent' => 'TEXT NULL AFTER ip_address',
+            'vin_result' => "VARCHAR(32) DEFAULT '' AFTER user_agent",
+        ];
 
-    $columns = [
-        'ip_address' => "VARCHAR(45) DEFAULT '' AFTER session_id",
-        'user_agent' => 'TEXT NULL AFTER ip_address',
-        'vin_result' => "VARCHAR(32) DEFAULT '' AFTER user_agent",
-    ];
+        foreach ($columns as $column => $definition) {
+            $exists = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$table_sql} LIKE %s", $column));
+            if ($exists === null) {
+                $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN {$column} {$definition}");
+            }
+        }
 
-    foreach ($columns as $column => $definition) {
-        $exists = $wpdb->get_var($wpdb->prepare("SHOW COLUMNS FROM {$table_sql} LIKE %s", $column));
-        if ($exists === null) {
-            $wpdb->query("ALTER TABLE {$table_sql} ADD COLUMN {$column} {$definition}");
+        $result_index = $wpdb->get_var("SHOW INDEX FROM {$table_sql} WHERE Key_name = 'vin_result'");
+        if ($result_index === null) {
+            $wpdb->query("ALTER TABLE {$table_sql} ADD KEY vin_result (vin_result)");
         }
     }
 
-    $result_index = $wpdb->get_var("SHOW INDEX FROM {$table_sql} WHERE Key_name = 'vin_result'");
-    if ($result_index === null) {
-        $wpdb->query("ALTER TABLE {$table_sql} ADD KEY vin_result (vin_result)");
-    }
+    mac_create_sitemap_logs_table();
+    mac_create_crawler_logs_table();
 }
