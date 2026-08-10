@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.27
+ * Version: 1.0.28
  * Author: AskarTech
  */
 
@@ -52,6 +52,7 @@ function mac_activate()
     mac_create_search_logs_table();
     mac_create_sitemap_logs_table();
     mac_create_crawler_logs_table();
+    mac_create_crawler_log_samples_table();
 
     if (!function_exists('gai_activate')) {
         mac_load_modules();
@@ -146,6 +147,29 @@ function mac_create_crawler_logs_table()
     dbDelta($sql);
 }
 
+function mac_create_crawler_log_samples_table()
+{
+    global $wpdb;
+
+    $table = $wpdb->prefix . 'crawler_log_samples';
+    $charset_collate = $wpdb->get_charset_collate();
+    $sql = "CREATE TABLE IF NOT EXISTS $table (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        log_date DATE NOT NULL,
+        ip_address VARCHAR(45) NOT NULL,
+        created_at DATETIME NOT NULL,
+        request_uri TEXT NULL,
+        response_code SMALLINT UNSIGNED NULL,
+        referer TEXT NULL,
+        PRIMARY KEY (id),
+        KEY daily_ip (log_date, ip_address),
+        KEY created_at (created_at)
+    ) $charset_collate;";
+
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta($sql);
+}
+
 function mac_create_search_logs_table()
 {
     global $wpdb;
@@ -214,4 +238,5 @@ function mac_ensure_search_logs_schema()
 
     mac_create_sitemap_logs_table();
     mac_create_crawler_logs_table();
+    mac_create_crawler_log_samples_table();
 }

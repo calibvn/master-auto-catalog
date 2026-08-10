@@ -208,6 +208,65 @@ add_action('admin_post_mac_search_logs_send_telegram', function () {
     exit;
 });
 
+add_action('admin_post_mac_logs_cleanup', function () {
+    if (!current_user_can('manage_options')) wp_die('Access denied.');
+
+    $log_type = sanitize_key(wp_unslash($_POST['log_type'] ?? ''));
+    $mode = sanitize_key(wp_unslash($_POST['mode'] ?? ''));
+    if (!in_array($log_type, ['search', 'sitemap', 'crawler'], true) || !in_array($mode, ['all', 'old'], true)) {
+        wp_die('Invalid cleanup request.');
+    }
+    check_admin_referer('mac_logs_cleanup_' . $log_type . '_' . $mode);
+
+    global $wpdb;
+    $tables = [
+        'search' => [$wpdb->prefix . 'search_logs'],
+        'sitemap' => [$wpdb->prefix . 'sitemap_logs'],
+        'crawler' => [$wpdb->prefix . 'crawler_log_samples', $wpdb->prefix . 'crawler_logs'],
+    ];
+    $deleted = 0;
+    foreach ($tables[$log_type] as $table) {
+        if ($mode === 'all') {
+            $result = $wpdb->query("DELETE FROM {$table}");
+        } elseif ($log_type === 'crawler') {
+            $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE log_date < %s", wp_date('Y-m-d', strtotime('-90 days', current_time('timestamp')))));
+        } else {
+            $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE created_at < %s", wp_date('Y-m-d H:i:s', strtotime('-90 days', current_time('timestamp')))));
+        }
+        if ($result !== false) $deleted += (int) $result;
+    }
+
+    set_transient('mac_logs_cleanup_result_' . get_current_user_id(), [
+        'type' => $log_type,
+        'mode' => $mode,
+        'deleted' => $deleted,
+    ], MINUTE_IN_SECONDS);
+    wp_safe_redirect(add_query_arg('page', 'wp-search-logs', admin_url('admin.php')));
+    exit;
+});
+
+function mac_logs_cleanup_buttons($log_type)
+{
+    ?>
+    <span style="display:inline-flex;gap:6px;align-items:center;">
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
+            <?php wp_nonce_field('mac_logs_cleanup_' . $log_type . '_old'); ?>
+            <input type="hidden" name="action" value="mac_logs_cleanup">
+            <input type="hidden" name="log_type" value="<?php echo esc_attr($log_type); ?>">
+            <input type="hidden" name="mode" value="old">
+            <button class="button button-small" type="submit" onclick="return confirm('Удалить записи старше 90 дней?');">Старше 90 дн.</button>
+        </form>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0;">
+            <?php wp_nonce_field('mac_logs_cleanup_' . $log_type . '_all'); ?>
+            <input type="hidden" name="action" value="mac_logs_cleanup">
+            <input type="hidden" name="log_type" value="<?php echo esc_attr($log_type); ?>">
+            <input type="hidden" name="mode" value="all">
+            <button class="button button-small button-link-delete" type="submit" onclick="return confirm('Полностью очистить этот журнал?');">Очистить</button>
+        </form>
+    </span>
+    <?php
+}
+
 /**
  * Ловим поисковые запросы - исправленная версия
  */
@@ -370,20 +429,6 @@ add_action('admin_menu', function () {
 
 function wp_search_logs_page()
 {
-
-    // Очистка логов
-    if (isset($_POST['clear_logs']) && check_admin_referer('clear_search_logs')) {
-        global $wpdb;
-        $table = $wpdb->prefix . 'search_logs';
-        $result = $wpdb->query("TRUNCATE TABLE $table");
-        
-        if ($result !== false) {
-            echo '<div class="notice notice-success is-dismissible"><p>Логи успешно очищены!</p></div>';
-        } else {
-            echo '<div class="notice notice-error is-dismissible"><p>Ошибка при очистке логов!</p></div>';
-        }
-    }
-
     if (!current_user_can('manage_options')) return;
 
     // Экспорт CSV по клику
@@ -450,6 +495,8 @@ function wp_search_logs_page()
     delete_transient('mac_search_logs_telegram_result_' . get_current_user_id());
     $sitemap_telegram_result = get_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
     delete_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
+    $cleanup_result = get_transient('mac_logs_cleanup_result_' . get_current_user_id());
+    delete_transient('mac_logs_cleanup_result_' . get_current_user_id());
 ?>
     <div class="wrap">
         <h1>Search Logs</h1>
@@ -470,6 +517,9 @@ function wp_search_logs_page()
             <div class="notice notice-info"><p>За сегодня не было просмотров карты сайта. Отчёт не отправлен.</p></div>
         <?php elseif ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'error'): ?>
             <div class="notice notice-error"><p><?php echo esc_html($sitemap_telegram_result['message']); ?></p></div>
+        <?php endif; ?>
+        <?php if ($cleanup_result): ?>
+            <div class="notice notice-success is-dismissible"><p>Удалено записей: <?php echo number_format_i18n((int) $cleanup_result['deleted']); ?>.</p></div>
         <?php endif; ?>
 
         <div class="postbox" style="margin: 20px 0; background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
@@ -619,8 +669,9 @@ function wp_search_logs_page()
         
         <!-- Последние запросы -->
         <div class="postbox" style="background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
-            <div class="postbox-header" style="background: #f1f1f1; padding: 10px 15px; border-bottom: 1px solid #ccd0d4;">
+            <div class="postbox-header" style="background: #f1f1f1; padding: 10px 15px; border-bottom: 1px solid #ccd0d4; display:flex; justify-content:space-between; align-items:center; gap:10px;">
                 <h2 style="margin: 0;">Последние поисковые запросы</h2>
+                <?php mac_logs_cleanup_buttons('search'); ?>
             </div>
             <div class="inside" style="padding: 15px;">
                 <table class="widefat fixed striped">
@@ -691,14 +742,6 @@ function wp_search_logs_page()
 
         <!-- Кнопка экспорта -->
         <p><a class="button button-primary" href="<?php echo esc_url($base_url . '&export=csv'); ?>">Скачать CSV со всеми данными</a></p>
-        <br>
-        <form method="post" style="margin: 0;">
-            <?php wp_nonce_field('clear_search_logs'); ?>
-            <button type="submit" name="clear_logs" class="button button-link-delete" 
-                    onclick="return confirm('Вы уверены, что хотите полностью очистить все логи поиска? Это действие нельзя отменить.')">
-                🗑️ Очистить все логи
-            </button>
-        </form>
     </div>
 
     <style>

@@ -3,6 +3,7 @@
 if (!defined('ABSPATH')) exit;
 
 const MAC_CRAWLER_LOGS_DAILY_THRESHOLD = 100;
+const MAC_CRAWLER_LOG_SAMPLES_LIMIT = 15;
 
 function mac_sitemap_logs_normalize_path($path)
 {
@@ -57,6 +58,17 @@ function mac_sitemap_logs_is_ignored_user_agent($user_agent)
     return stripos((string) $user_agent, 'AccelerateWP/Preload') !== false;
 }
 
+function mac_sitemap_logs_is_official_bot($bot_name)
+{
+    return in_array($bot_name, ['Googlebot', 'YandexBot', 'Bingbot', 'DuckDuckBot', 'BaiduSpider', 'Applebot'], true);
+}
+
+function mac_crawler_logs_report_end_date(DateTimeInterface $end)
+{
+    if ($end->format('H:i:s') === '00:00:00') return $end->format('Y-m-d');
+    return wp_date('Y-m-d', $end->getTimestamp() + DAY_IN_SECONDS, wp_timezone());
+}
+
 function mac_sitemap_logs_begin_request()
 {
     if (isset($GLOBALS['mac_sitemap_logs_current_request'])) return;
@@ -100,6 +112,7 @@ function mac_crawler_logs_begin_request()
         'ip_address' => substr(sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'] ?? '')), 0, 45),
         'user_agent' => substr(sanitize_text_field(wp_unslash($user_agent)), 0, 2048),
         'request_uri' => substr(sanitize_text_field(wp_unslash($_SERVER['REQUEST_URI'] ?? '')), 0, 2048),
+        'referer' => substr(esc_url_raw(wp_unslash($_SERVER['HTTP_REFERER'] ?? '')), 0, 2048),
     ];
 
     add_action('shutdown', 'mac_crawler_logs_write_current_request', PHP_INT_MAX);
@@ -139,6 +152,40 @@ function mac_crawler_logs_write_current_request()
         $data['request_uri'],
         $response_code
     ));
+
+    $request_count = (int) $wpdb->get_var($wpdb->prepare(
+        "SELECT request_count FROM {$table} WHERE log_date = %s AND ip_address = %s",
+        current_time('Y-m-d'),
+        $data['ip_address']
+    ));
+    if ($request_count < MAC_CRAWLER_LOGS_DAILY_THRESHOLD) return;
+
+    $samples_table = $wpdb->prefix . 'crawler_log_samples';
+    $wpdb->insert($samples_table, [
+        'log_date' => current_time('Y-m-d'),
+        'ip_address' => $data['ip_address'],
+        'created_at' => $now,
+        'request_uri' => $data['request_uri'],
+        'response_code' => $response_code,
+        'referer' => $data['referer'],
+    ], ['%s', '%s', '%s', '%s', '%d', '%s']);
+
+    $wpdb->query($wpdb->prepare(
+        "DELETE FROM {$samples_table}
+         WHERE log_date = %s AND ip_address = %s AND id NOT IN (
+            SELECT id FROM (
+                SELECT id FROM {$samples_table}
+                WHERE log_date = %s AND ip_address = %s
+                ORDER BY id DESC
+                LIMIT %d
+            ) AS latest_samples
+         )",
+        current_time('Y-m-d'),
+        $data['ip_address'],
+        current_time('Y-m-d'),
+        $data['ip_address'],
+        MAC_CRAWLER_LOG_SAMPLES_LIMIT
+    ));
 }
 
 function mac_sitemap_logs_write_current_request()
@@ -176,23 +223,56 @@ function mac_sitemap_logs_send_report(DateTimeInterface $start, DateTimeInterfac
 
     $table = $wpdb->prefix . 'sitemap_logs';
     $summary = $wpdb->get_results($wpdb->prepare(
-        "SELECT sitemap_path, bot_name, COUNT(*) AS count
+        "SELECT bot_name, COUNT(*) AS count
          FROM {$table}
          WHERE created_at >= %s AND created_at < %s AND user_agent NOT LIKE %s
-         GROUP BY sitemap_path, bot_name
-         ORDER BY sitemap_path ASC, count DESC, bot_name ASC",
+         GROUP BY bot_name
+         ORDER BY count DESC, bot_name ASC",
         $start->format('Y-m-d H:i:s'),
         $end->format('Y-m-d H:i:s'),
         '%AccelerateWP/Preload%'
     ), ARRAY_A);
 
-    if (!$summary) return ['status' => 'empty'];
-
-    $total = array_sum(array_map('intval', wp_list_pluck($summary, 'count')));
-    $host = wp_parse_url(home_url(), PHP_URL_HOST) ?: home_url();
-    $lines = [$host, 'Просмотров XML: ' . $total];
+    $visitors_count = 0;
+    $bots_count = 0;
     foreach ($summary as $row) {
-        $lines[] = $row['sitemap_path'] . ' — ' . ($row['bot_name'] ?: 'Неизвестно') . ' — ' . (int) $row['count'];
+        $count = (int) $row['count'];
+        if ($row['bot_name'] === 'Посетитель') {
+            $visitors_count += $count;
+        } elseif (!mac_sitemap_logs_is_official_bot((string) $row['bot_name'])) {
+            $bots_count += $count;
+        }
+    }
+
+    $crawler_table = $wpdb->prefix . 'crawler_logs';
+    $crawler_end_date = mac_crawler_logs_report_end_date($end);
+    $intensive_visitors = $wpdb->get_results($wpdb->prepare(
+        "SELECT ip_address, SUM(request_count) AS count,
+                LEFT(SUBSTRING_INDEX(GROUP_CONCAT(user_agent ORDER BY last_seen DESC SEPARATOR '\n'), '\n', 1), 120) AS user_agent
+         FROM {$crawler_table}
+         WHERE log_date >= %s AND log_date < %s
+           AND request_count >= %d
+           AND bot_name = 'Посетитель'
+           AND user_agent NOT LIKE %s
+         GROUP BY ip_address
+         ORDER BY count DESC, ip_address ASC
+         LIMIT 20",
+        $start->format('Y-m-d'),
+        $crawler_end_date,
+        MAC_CRAWLER_LOGS_DAILY_THRESHOLD,
+        '%AccelerateWP/Preload%'
+    ), ARRAY_A);
+
+    if (($visitors_count + $bots_count) === 0 && !$intensive_visitors) return ['status' => 'empty'];
+
+    $host = wp_parse_url(home_url(), PHP_URL_HOST) ?: home_url();
+    $lines = [$host, 'Просмотрено карт (посетителями): ' . $visitors_count, 'Просмотрено карт (ботами): ' . $bots_count];
+    if ($intensive_visitors) {
+        $lines[] = '';
+        $lines[] = 'Интенсивные просмотры (посетители):';
+        foreach ($intensive_visitors as $row) {
+            $lines[] = $row['ip_address'] . ' — ' . (int) $row['count'] . ' — ' . ($row['user_agent'] ?: '—');
+        }
     }
 
     $body = [
@@ -245,6 +325,31 @@ function mac_sitemap_logs_export_csv()
     exit;
 }
 
+add_action('wp_ajax_mac_crawler_logs_details', function () {
+    if (!current_user_can('manage_options')) wp_send_json_error(['message' => 'Access denied.'], 403);
+    check_ajax_referer('mac_crawler_logs_details', 'nonce');
+
+    $log_date = sanitize_text_field(wp_unslash($_POST['log_date'] ?? ''));
+    $ip_address = sanitize_text_field(wp_unslash($_POST['ip_address'] ?? ''));
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $log_date) || !filter_var($ip_address, FILTER_VALIDATE_IP)) {
+        wp_send_json_error(['message' => 'Некорректные параметры.'], 400);
+    }
+
+    global $wpdb;
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT created_at, request_uri, response_code, referer
+         FROM {$wpdb->prefix}crawler_log_samples
+         WHERE log_date = %s AND ip_address = %s
+         ORDER BY id DESC
+         LIMIT %d",
+        $log_date,
+        $ip_address,
+        MAC_CRAWLER_LOG_SAMPLES_LIMIT
+    ), ARRAY_A);
+
+    wp_send_json_success(['rows' => $rows]);
+});
+
 function mac_sitemap_logs_render_admin_table()
 {
     global $wpdb;
@@ -258,7 +363,7 @@ function mac_sitemap_logs_render_admin_table()
     $base_url = admin_url('admin.php?page=wp-search-logs');
     ?>
     <div class="postbox" style="margin:20px 0;background:white;border:1px solid #ccd0d4;border-radius:4px;">
-        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;"><h2 style="margin:0;">Логи карты сайта</h2></div>
+        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;display:flex;justify-content:space-between;align-items:center;gap:10px;"><h2 style="margin:0;">Логи карты сайта</h2><?php mac_logs_cleanup_buttons('sitemap'); ?></div>
         <div class="inside" style="padding:15px;overflow-x:auto;">
             <p>Записей: <strong><?php echo number_format_i18n($total); ?></strong></p>
             <table class="widefat striped">
@@ -317,11 +422,11 @@ function mac_crawler_logs_render_admin_table()
     $base_url = admin_url('admin.php?page=wp-search-logs');
     ?>
     <div class="postbox" style="margin:20px 0;background:white;border:1px solid #ccd0d4;border-radius:4px;">
-        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;"><h2 style="margin:0;">Интенсивные обходы страниц</h2></div>
+        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;display:flex;justify-content:space-between;align-items:center;gap:10px;"><h2 style="margin:0;">Интенсивные обходы страниц</h2><?php mac_logs_cleanup_buttons('crawler'); ?></div>
         <div class="inside" style="padding:15px;overflow-x:auto;">
             <p>Показаны IP с <?php echo (int) $threshold; ?> и более запросами за один день. Одна строка — один IP за день.</p>
             <table class="widefat striped">
-                <thead><tr><th>Дата</th><th>Бот / посетитель</th><th>IP</th><th>Запросов</th><th>Первый / последний</th><th>Последний URL</th><th>User-Agent</th></tr></thead>
+                <thead><tr><th>Дата</th><th>Бот / посетитель</th><th>IP</th><th>Запросов</th><th>Первый / последний</th><th>Последний URL</th><th>User-Agent</th><th>Запросы</th></tr></thead>
                 <tbody>
                 <?php if ($rows): foreach ($rows as $row): ?>
                     <tr>
@@ -332,9 +437,10 @@ function mac_crawler_logs_render_admin_table()
                         <td><?php echo esc_html(date_i18n('H:i:s', strtotime($row['first_seen'])) . ' — ' . date_i18n('H:i:s', strtotime($row['last_seen']))); ?></td>
                         <td style="word-break:break-word;max-width:260px;"><?php echo esc_html($row['last_request_uri'] ?: '—'); ?></td>
                         <td style="word-break:break-word;min-width:260px;"><?php echo esc_html($row['user_agent'] ?: '—'); ?></td>
+                        <td><button type="button" class="button button-small mac-crawler-log-details" title="Последние 15 запросов" data-date="<?php echo esc_attr($row['log_date']); ?>" data-ip="<?php echo esc_attr($row['ip_address']); ?>">👁</button></td>
                     </tr>
                 <?php endforeach; else: ?>
-                    <tr><td colspan="7">IP с высокой активностью пока не найдено.</td></tr>
+                    <tr><td colspan="8">IP с высокой активностью пока не найдено.</td></tr>
                 <?php endif; ?>
                 </tbody>
             </table>
@@ -350,5 +456,45 @@ function mac_crawler_logs_render_admin_table()
             <?php endif; ?>
         </div>
     </div>
+    <div id="mac-crawler-log-modal" style="display:none;position:fixed;z-index:100000;inset:0;background:rgba(0,0,0,.45);padding:40px 20px;overflow:auto;">
+        <div style="background:#fff;max-width:1000px;margin:0 auto;padding:20px;border-radius:6px;position:relative;">
+            <button type="button" id="mac-crawler-log-modal-close" class="button-link" style="position:absolute;right:15px;top:12px;font-size:22px;">&times;</button>
+            <h2 style="margin-top:0;">Последние 15 запросов</h2>
+            <div id="mac-crawler-log-modal-content">Загрузка&hellip;</div>
+        </div>
+    </div>
+    <script>
+    (function () {
+        var modal = document.getElementById('mac-crawler-log-modal');
+        var content = document.getElementById('mac-crawler-log-modal-content');
+        var close = document.getElementById('mac-crawler-log-modal-close');
+        var escapeHtml = function (value) { var node = document.createElement('span'); node.textContent = value || '—'; return node.innerHTML; };
+        var closeModal = function () { modal.style.display = 'none'; };
+        close.addEventListener('click', closeModal);
+        modal.addEventListener('click', function (event) { if (event.target === modal) closeModal(); });
+        document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeModal(); });
+        document.querySelectorAll('.mac-crawler-log-details').forEach(function (button) {
+            button.addEventListener('click', function () {
+                modal.style.display = 'block';
+                content.textContent = 'Загрузка…';
+                var form = new FormData();
+                form.append('action', 'mac_crawler_logs_details');
+                form.append('nonce', '<?php echo esc_js(wp_create_nonce('mac_crawler_logs_details')); ?>');
+                form.append('log_date', button.dataset.date);
+                form.append('ip_address', button.dataset.ip);
+                fetch(ajaxurl, { method: 'POST', credentials: 'same-origin', body: form }).then(function (response) { return response.json(); }).then(function (response) {
+                    if (!response.success) throw new Error(response.data && response.data.message ? response.data.message : 'Ошибка загрузки.');
+                    if (!response.data.rows.length) { content.textContent = 'Детальные записи появятся для новых запросов после обновления плагина.'; return; }
+                    var html = '<table class="widefat striped"><thead><tr><th>Время</th><th>URL</th><th>Статус</th><th>Referer</th></tr></thead><tbody>';
+                    response.data.rows.forEach(function (row) {
+                        var url = <?php echo wp_json_encode(home_url('/')); ?>.replace(/\/$/, '') + (row.request_uri || '');
+                        html += '<tr><td>' + escapeHtml(row.created_at) + '</td><td style="word-break:break-word;"><a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(row.request_uri) + '</a></td><td>' + escapeHtml(String(row.response_code || '—')) + '</td><td style="word-break:break-word;">' + escapeHtml(row.referer) + '</td></tr>';
+                    });
+                    content.innerHTML = html + '</tbody></table>';
+                }).catch(function (error) { content.textContent = error.message; });
+            });
+        });
+    }());
+    </script>
     <?php
 }
