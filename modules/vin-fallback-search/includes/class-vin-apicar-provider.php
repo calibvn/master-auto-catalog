@@ -12,6 +12,7 @@ class VIN_Apicar_Provider implements VIN_Provider_Interface
 
     public function search($query)
     {
+        $started_at = microtime(true);
         $vin = strtoupper(preg_replace('/\s+/', '', (string)$query));
 
         if (empty($this->api_key)) {
@@ -30,22 +31,31 @@ class VIN_Apicar_Provider implements VIN_Provider_Interface
         ]);
 
         if (is_wp_error($response)) {
+            mac_vin_provider_health_signal('apicar', 'Apicar.store', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message(), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception($response->get_error_message());
         }
 
         $code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
+        $content_type = wp_remote_retrieve_header($response, 'content-type');
 
         if ($code === 401 || $code === 403) {
+            mac_vin_provider_health_signal('apicar', 'Apicar.store', 'down', ['failure_type' => 'unauthorized', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('API unauthorized (' . $code . '). Проверьте API ключ.');
         }
 
         if ($code < 200 || $code >= 300) {
-            return null;
+            mac_vin_provider_health_signal('apicar', 'Apicar.store', 'down', ['failure_type' => 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
+            throw new Exception('Apicar.store HTTP error (' . $code . ').');
         }
 
         $data = json_decode($body, true);
-        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data) || empty($data)) {
+        if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            mac_vin_provider_health_signal('apicar', 'Apicar.store', 'down', ['failure_type' => 'invalid_response', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
+            throw new Exception('Apicar.store returned an invalid response.');
+        }
+        mac_vin_provider_health_signal('apicar', 'Apicar.store', 'up', ['http_code' => $code, 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
+        if (empty($data)) {
             return null;
         }
 

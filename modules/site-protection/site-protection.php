@@ -34,6 +34,67 @@ function mac_site_protection_central_config() {
     ];
 }
 
+/**
+ * Receives only technical VIN-provider health signals. It never stores a VIN,
+ * API key, password or complete remote response on the executor.
+ */
+function mac_site_protection_record_vin_api_health($provider_key, $provider_label, $state, $details = []) {
+    $provider_key = sanitize_key((string) $provider_key);
+    $provider_label = substr(sanitize_text_field((string) $provider_label), 0, 80);
+    $state = $state === 'up' ? 'up' : 'down';
+    if ($provider_key === '' || $provider_label === '') return;
+
+    $details = is_array($details) ? $details : [];
+    $http_code = max(0, (int) ($details['http_code'] ?? 0));
+    $elapsed_ms = max(0, (int) ($details['elapsed_ms'] ?? 0));
+    $failure_type = substr(sanitize_key((string) ($details['failure_type'] ?? '')), 0, 64);
+    $detail = substr(sanitize_text_field((string) ($details['detail'] ?? '')), 0, 180);
+    $signature = implode('|', [$failure_type, $http_code, $detail]);
+    $states = (array) get_option('mac_vin_provider_health_state', []);
+    $previous = is_array($states[$provider_key] ?? null) ? $states[$provider_key] : [];
+    $should_queue = false;
+
+    if ($state === 'down') {
+        $should_queue = ($previous['state'] ?? 'unknown') !== 'down' || ($previous['signature'] ?? '') !== $signature;
+        $states[$provider_key] = [
+            'state' => 'down', 'signature' => $signature, 'provider_label' => $provider_label,
+            'http_code' => $http_code, 'failure_type' => $failure_type, 'detail' => $detail,
+            'elapsed_ms' => $elapsed_ms, 'updated_at' => current_time('mysql'),
+        ];
+    } else {
+        $should_queue = ($previous['state'] ?? 'unknown') === 'down';
+        $states[$provider_key] = [
+            'state' => 'up', 'signature' => '', 'provider_label' => $provider_label,
+            'http_code' => $http_code, 'failure_type' => '', 'detail' => '',
+            'elapsed_ms' => $elapsed_ms, 'updated_at' => current_time('mysql'),
+        ];
+    }
+    update_option('mac_vin_provider_health_state', $states, false);
+    if (!$should_queue) return;
+
+    $queue = (array) get_option('mac_vin_provider_health_queue', []);
+    $queue[] = [
+        'source_key' => 'vin-api-' . wp_generate_uuid4(),
+        'occurred_at' => current_time('mysql'),
+        'provider_key' => $provider_key,
+        'provider_label' => $provider_label,
+        'state' => $state,
+        'failure_type' => $failure_type,
+        'http_code' => $http_code,
+        'elapsed_ms' => $elapsed_ms,
+        'detail' => $detail,
+    ];
+    update_option('mac_vin_provider_health_queue', array_slice($queue, -100), false);
+
+    // Do not make a central HTTP call during a visitor request. Ask WP-Cron to
+    // deliver this state transition shortly; the normal five-minute sync is a fallback.
+    if (!get_transient('mac_vin_provider_health_sync_pending')) {
+        set_transient('mac_vin_provider_health_sync_pending', '1', 2 * MINUTE_IN_SECONDS);
+        wp_schedule_single_event(time() + MINUTE_IN_SECONDS, MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK);
+    }
+}
+add_action('mac_vin_provider_health', 'mac_site_protection_record_vin_api_health', 10, 4);
+
 function mac_site_protection_central_row_subject($ip, $ua = '') {
     return mac_site_protection_subject((string) $ip, mac_site_protection_traffic_class((string) $ua, (string) $ip));
 }
@@ -103,7 +164,8 @@ function mac_site_protection_central_sync() {
     $sitemapRows = $wpdb->get_results("SELECT * FROM {$sitemapTable} ORDER BY id ASC LIMIT 200", ARRAY_A);
     $crawlerRows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$crawlerTable} WHERE log_date >= %s AND request_count >= %d ORDER BY id ASC LIMIT 300", wp_date('Y-m-d', time() - DAY_IN_SECONDS), MAC_CRAWLER_LOGS_DAILY_THRESHOLD), ARRAY_A);
     $acks = (array) get_option('mac_site_protection_central_acks', []);
-    $payload = ['agent_version' => MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION, 'events' => [], 'sitemap_logs' => [], 'crawler_daily' => [], 'command_acks' => $acks];
+    $vinApiEvents = array_slice((array) get_option('mac_vin_provider_health_queue', []), 0, 50);
+    $payload = ['agent_version' => MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION, 'events' => [], 'sitemap_logs' => [], 'crawler_daily' => [], 'vin_api_events' => $vinApiEvents, 'command_acks' => $acks];
 
     foreach ($eventsRows as $row) {
         $payload['events'][] = ['source_key' => 'event-' . (int) $row['id'], 'occurred_at' => $row['created_at'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'rule_key' => $row['rule_key'], 'request_count' => (int) $row['request_count'], 'threshold_count' => (int) $row['threshold_count'], 'action_taken' => $row['action_taken'], 'request_uri' => $row['request_uri'], 'user_agent' => $row['user_agent']];
@@ -124,6 +186,13 @@ function mac_site_protection_central_sync() {
 
     if ($eventsRows) $wpdb->query("DELETE FROM {$eventsTable} WHERE id IN (" . implode(',', array_map('intval', wp_list_pluck($eventsRows, 'id'))) . ')');
     if ($sitemapRows) $wpdb->query("DELETE FROM {$sitemapTable} WHERE id IN (" . implode(',', array_map('intval', wp_list_pluck($sitemapRows, 'id'))) . ')');
+    if ($vinApiEvents) {
+        $pending = (array) get_option('mac_vin_provider_health_queue', []);
+        $delivered = array_flip(array_filter(array_map(static function ($row) { return (string) ($row['source_key'] ?? ''); }, $vinApiEvents)));
+        update_option('mac_vin_provider_health_queue', array_values(array_filter($pending, static function ($row) use ($delivered) {
+            return !isset($delivered[(string) ($row['source_key'] ?? '')]);
+        })), false);
+    }
     // Keep only current and previous daily aggregates on the executor. The
     // centre received the final aggregate before local cleanup.
     $cutoff = wp_date('Y-m-d', time() - 2 * DAY_IN_SECONDS);

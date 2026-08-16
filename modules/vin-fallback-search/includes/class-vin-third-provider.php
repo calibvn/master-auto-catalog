@@ -12,6 +12,7 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
 
     public function search($query)
     {
+        $started_at = microtime(true);
         $vin = strtoupper(preg_replace('/\s+/', '', (string)$query));
 
         if (empty($this->api_key)) {
@@ -19,19 +20,19 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
         }
 
         // Проверяем существование VIN
-        $vin_exists = $this->check_vin_exists($vin);
+        $vin_exists = $this->check_vin_exists($vin, $started_at);
         if (!$vin_exists) {
             return null;
         }
 
         // Получаем детальный отчет
-        return $this->get_vin_report($vin);
+        return $this->get_vin_report($vin, $started_at);
     }
 
     /**
      * Проверка существования VIN
      */
-    private function check_vin_exists($vin)
+    private function check_vin_exists($vin, $started_at)
     {
         $exists_url = "https://auctionsapi.com/api/local-exists/{$vin}";
 
@@ -45,30 +46,35 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
         ]);
 
         if (is_wp_error($response)) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message(), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('Ошибка проверки VIN: ' . $response->get_error_message());
         }
 
         $code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
+        $content_type = wp_remote_retrieve_header($response, 'content-type');
 
         if ($code === 401 || $code === 403) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'unauthorized', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('API unauthorized (' . $code . '). Проверьте API ключ.');
         }
 
         if ($code < 200 || $code >= 300) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Third API: VIN check failed with code: ' . $code);
             }
-            return false;
+            throw new Exception('Auctionsapi HTTP error (' . $code . ').');
         }
 
         $exists_data = json_decode($body, true);
 
         if (json_last_error() !== JSON_ERROR_NONE) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'invalid_response', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Third API: JSON decode error: ' . json_last_error_msg());
             }
-            return false;
+            throw new Exception('Auctionsapi returned an invalid response.');
         }
 
         // Проверяем существует ли VIN
@@ -79,6 +85,7 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
         }
 
         if (!$vin_exists) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'up', ['http_code' => $code, 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Third API: VIN ' . $vin . ' не существует в базе');
             }
@@ -91,7 +98,7 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
     /**
      * Получение детального отчета по VIN
      */
-    private function get_vin_report($vin)
+    private function get_vin_report($vin, $started_at)
     {
         $report_url = "https://auctionsapi.com/api/local-report/{$vin}";
 
@@ -105,30 +112,37 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
         ]);
 
         if (is_wp_error($response)) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message(), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('Ошибка получения отчета: ' . $response->get_error_message());
         }
 
         $code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
+        $content_type = wp_remote_retrieve_header($response, 'content-type');
 
         if ($code === 401 || $code === 403) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'unauthorized', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('API unauthorized (' . $code . '). Проверьте API ключ.');
         }
 
         if ($code < 200 || $code >= 300) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Third API: Report request failed with code: ' . $code);
             }
-            return null;
+            throw new Exception('Auctionsapi report HTTP error (' . $code . ').');
         }
 
         $report_data = json_decode($body, true);
         if (json_last_error() !== JSON_ERROR_NONE || !is_array($report_data)) {
+            mac_vin_provider_health_signal('api3', 'Auctionsapi', 'down', ['failure_type' => 'invalid_response', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Third API: Report JSON decode error: ' . json_last_error_msg());
             }
-            return null;
+            throw new Exception('Auctionsapi returned an invalid report.');
         }
+
+        mac_vin_provider_health_signal('api3', 'Auctionsapi', 'up', ['http_code' => $code, 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
 
         if (VIN_FS_DEBUG) {
             error_log('[VIN Fallback] Third API: Successfully parsed report data');

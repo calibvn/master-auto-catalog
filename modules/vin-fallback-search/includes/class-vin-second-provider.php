@@ -18,6 +18,7 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
 
     public function search($query)
     {
+        $started_at = microtime(true);
         $vin = strtoupper(preg_replace('/\s+/', '', (string)$query));
 
         if (empty($this->login) || empty($this->password)) {
@@ -44,11 +45,13 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
         ]);
 
         if (is_wp_error($response)) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message(), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('Ошибка запроса VIN history: ' . $response->get_error_message());
         }
 
         $code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
+        $content_type = wp_remote_retrieve_header($response, 'content-type');
 
         if (VIN_FS_DEBUG) {
             error_log('[VIN Fallback] Second API: Response code: ' . $code);
@@ -75,27 +78,33 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
             ]);
 
             if (is_wp_error($response)) {
+                mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message(), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
                 throw new Exception('Ошибка повторного запроса VIN: ' . $response->get_error_message());
             }
 
             $code = wp_remote_retrieve_response_code($response);
             $body = wp_remote_retrieve_body($response);
+            $content_type = wp_remote_retrieve_header($response, 'content-type');
         }
 
         if ($code < 200 || $code >= 300) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => $code === 401 || $code === 403 ? 'unauthorized' : 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Second API: VIN history request failed with code: ' . $code);
             }
-            return null;
+            throw new Exception('Auction API HTTP error (' . $code . ').');
         }
 
         $data = json_decode($body, true);
         if (json_last_error() !== JSON_ERROR_NONE || !is_array($data)) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => 'invalid_response', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             if (VIN_FS_DEBUG) {
                 error_log('[VIN Fallback] Second API: JSON decode error: ' . json_last_error_msg());
             }
-            return null;
+            throw new Exception('Auction API returned an invalid response.');
         }
+
+        mac_vin_provider_health_signal('api2', 'Auction API', 'up', ['http_code' => $code, 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
 
         if (empty($data['data']) || !is_array($data['data'])) {
             if (VIN_FS_DEBUG) {
@@ -151,6 +160,7 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
         ]);
 
         if (is_wp_error($response)) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => 'network', 'detail' => $response->get_error_message()]);
             throw new Exception('Ошибка получения токена: ' . $response->get_error_message());
         }
 
@@ -158,11 +168,13 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
         $body = wp_remote_retrieve_body($response);
 
         if ($code < 200 || $code >= 300) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => $code === 401 || $code === 403 ? 'unauthorized' : 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, wp_remote_retrieve_header($response, 'content-type'))]);
             throw new Exception('Ошибка авторизации: ' . $code);
         }
 
         $data = json_decode($body, true);
         if (json_last_error() !== JSON_ERROR_NONE || !isset($data['token'])) {
+            mac_vin_provider_health_signal('api2', 'Auction API', 'down', ['failure_type' => 'invalid_response', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, wp_remote_retrieve_header($response, 'content-type'))]);
             throw new Exception('Неверный ответ при авторизации');
         }
 
