@@ -372,6 +372,21 @@ function mac_site_protection_is_meaningful_request($path) {
     return preg_match('/\.(?:css|js|map|jpe?g|png|gif|webp|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip)$/i', $path) !== 1;
 }
 
+/**
+ * Native WordPress search is intentionally outside the site-protection
+ * counters. High search activity is useful to the catalogue and must not
+ * create an intensive-crawler record or trigger an IP block.
+ */
+function mac_site_protection_is_site_search_request($wp = null) {
+    if (array_key_exists('s', $_GET)) return true;
+    if (is_object($wp) && isset($wp->query_vars) && array_key_exists('s', (array) $wp->query_vars)) return true;
+
+    $query = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_QUERY);
+    if ($query === '') return false;
+    parse_str($query, $params);
+    return array_key_exists('s', $params);
+}
+
 function mac_site_protection_honeypot_path() {
     return '/mac-crawler-trap/';
 }
@@ -464,10 +479,11 @@ function mac_site_protection_handle_threshold($ip, $rule_key, $count, $limit, $m
     mac_site_protection_reject(mac_site_protection_escalation_minutes(1) * MINUTE_IN_SECONDS, 'Access temporarily restricted. Please try again later.');
 }
 
-function mac_site_protection_enforce_v2() {
+function mac_site_protection_enforce_v2($wp = null) {
     if (is_admin() || (is_user_logged_in() && current_user_can('manage_options'))) return;
     $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     if (!in_array($method, ['GET', 'HEAD'], true)) return;
+    if (mac_site_protection_is_site_search_request($wp)) return;
 
     $ip = mac_site_protection_client_ip();
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');

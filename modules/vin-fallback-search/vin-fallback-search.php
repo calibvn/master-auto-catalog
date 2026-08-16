@@ -1302,17 +1302,22 @@ class VINFallbackSearch
         $existing_product = $this->check_existing_product($q);
 
         if ($existing_product === false) {
-            do_action('mac_vin_fallback_search_result', 'existing', $q);
+            // A SKU exists but the product is not public (including draft
+            // placeholders and draft hides). Do not treat it as an ordinary
+            // existing vehicle in the search-log report.
+            do_action('mac_vin_fallback_search_result', 'existing_hidden', $q);
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists but is draft - show "nothing found"');
             return;
         }
 
         if ($existing_product !== null) {
-            do_action('mac_vin_fallback_search_result', 'existing', $q);
             if ($this->is_redirect_hidden_product((int)$existing_product)) {
+                do_action('mac_vin_fallback_search_result', 'existing_hidden', $q);
                 if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists but is hidden with redirect - show "nothing found"');
                 return;
             }
+
+            do_action('mac_vin_fallback_search_result', 'existing', $q);
 
             if (VIN_FS_DEBUG) error_log('[VIN Fallback] Product exists and published: #' . $existing_product . ' - redirecting');
             wp_safe_redirect(get_permalink($existing_product), 302);

@@ -26,6 +26,7 @@ function wp_search_logs_vin_result_label($result)
 {
     $labels = [
         'existing' => 'VIN был на сайте',
+        'existing_hidden' => 'VIN был на сайте (скрыт)',
         'created' => 'VIN создался',
         'not_found' => 'VIN не найден',
         'creation_error' => 'Ошибка создания',
@@ -36,7 +37,7 @@ function wp_search_logs_vin_result_label($result)
 
 function wp_search_logs_update_vin_result($result, $vin)
 {
-    $allowed_results = ['existing', 'created', 'not_found', 'creation_error'];
+    $allowed_results = ['existing', 'existing_hidden', 'created', 'not_found', 'creation_error'];
     if (!in_array($result, $allowed_results, true)) {
         return;
     }
