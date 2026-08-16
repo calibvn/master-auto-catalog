@@ -9,7 +9,6 @@
 
 if (!defined('ABSPATH')) exit;
 
-require_once __DIR__ . '/sitemap-logs.php';
 
 function wp_search_logs_normalize_vin($search_query)
 {
@@ -68,7 +67,6 @@ function mac_search_logs_telegram_settings()
         'bot_token' => '',
         'chat_id' => '-1003180903998',
         'topic_id' => '264801',
-        'sitemap_topic_id' => '27659',
         'daily_enabled' => '1',
         'weekly_enabled' => '1',
     ]);
@@ -159,7 +157,6 @@ add_action(MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK, function () {
     if ($settings['daily_enabled'] === '1') {
         $end = new DateTimeImmutable('today', wp_timezone());
         mac_search_logs_telegram_send($end->modify('-1 day'), $end);
-        mac_sitemap_logs_send_report($end->modify('-1 day'), $end);
     }
 });
 
@@ -169,7 +166,6 @@ add_action(MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK, function () {
         $today = new DateTimeImmutable('today', wp_timezone());
         $end = $today->modify('-' . ((int) $today->format('N') - 1) . ' days');
         mac_search_logs_telegram_send($end->modify('-7 days'), $end);
-        mac_sitemap_logs_send_report($end->modify('-7 days'), $end);
     }
 });
 
@@ -186,7 +182,6 @@ add_action('admin_post_mac_search_logs_save_telegram', function () {
         'bot_token' => $token !== '' ? sanitize_text_field($token) : $current['bot_token'],
         'chat_id' => preg_replace('/[^0-9-]/', '', (string) wp_unslash($_POST['chat_id'] ?? '')),
         'topic_id' => preg_replace('/[^0-9]/', '', (string) wp_unslash($_POST['topic_id'] ?? '')),
-        'sitemap_topic_id' => preg_replace('/[^0-9]/', '', (string) wp_unslash($_POST['sitemap_topic_id'] ?? $current['sitemap_topic_id'])),
         'daily_enabled' => isset($_POST['daily_enabled']) ? '1' : '0',
         'weekly_enabled' => isset($_POST['weekly_enabled']) ? '1' : '0',
     ], false);
@@ -213,7 +208,7 @@ add_action('admin_post_mac_logs_cleanup', function () {
 
     $log_type = sanitize_key(wp_unslash($_POST['log_type'] ?? ''));
     $mode = sanitize_key(wp_unslash($_POST['mode'] ?? ''));
-    if (!in_array($log_type, ['search', 'sitemap', 'crawler'], true) || !in_array($mode, ['all', 'old'], true)) {
+    if (!in_array($log_type, ['search', 'sitemap', 'crawler', 'protection_events', 'blocks', 'xml_restricted'], true) || !in_array($mode, ['all', 'old'], true)) {
         wp_die('Invalid cleanup request.');
     }
     check_admin_referer('mac_logs_cleanup_' . $log_type . '_' . $mode);
@@ -223,17 +218,26 @@ add_action('admin_post_mac_logs_cleanup', function () {
         'search' => [$wpdb->prefix . 'search_logs'],
         'sitemap' => [$wpdb->prefix . 'sitemap_logs'],
         'crawler' => [$wpdb->prefix . 'crawler_log_samples', $wpdb->prefix . 'crawler_logs'],
+        'protection_events' => [$wpdb->prefix . 'site_protection_events'],
+        'blocks' => [$wpdb->prefix . 'site_protection_blocks'],
+        'xml_restricted' => [$wpdb->prefix . 'sitemap_logs'],
     ];
     $deleted = 0;
     foreach ($tables[$log_type] as $table) {
+        $where = '';
+        if ($log_type === 'xml_restricted') $where = ' WHERE response_code IN (403, 429)';
         if ($mode === 'all') {
-            $result = $wpdb->query("DELETE FROM {$table}");
+            $result = $wpdb->query("DELETE FROM {$table}{$where}");
         } elseif ($log_type === 'crawler') {
             $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE log_date < %s", wp_date('Y-m-d', strtotime('-90 days', current_time('timestamp')))));
         } else {
-            $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE created_at < %s", wp_date('Y-m-d H:i:s', strtotime('-90 days', current_time('timestamp')))));
+            $condition = $log_type === 'xml_restricted' ? 'response_code IN (403, 429) AND ' : '';
+            $result = $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE {$condition}created_at < %s", wp_date('Y-m-d H:i:s', strtotime('-90 days', current_time('timestamp')))));
         }
         if ($result !== false) $deleted += (int) $result;
+    }
+    if ($log_type === 'blocks' && function_exists('mac_site_protection_state_version')) {
+        update_option(MAC_SITE_PROTECTION_STATE_VERSION_OPTION, mac_site_protection_state_version() + 1, false);
     }
 
     set_transient('mac_logs_cleanup_result_' . get_current_user_id(), [
@@ -241,7 +245,7 @@ add_action('admin_post_mac_logs_cleanup', function () {
         'mode' => $mode,
         'deleted' => $deleted,
     ], MINUTE_IN_SECONDS);
-    wp_safe_redirect(add_query_arg('page', 'wp-search-logs', admin_url('admin.php')));
+    wp_safe_redirect(add_query_arg('page', in_array($log_type, ['sitemap', 'crawler', 'protection_events', 'blocks', 'xml_restricted'], true) ? 'mac-site-protection' : 'wp-search-logs', admin_url('admin.php')));
     exit;
 });
 
@@ -307,7 +311,9 @@ add_action('wp', function () {
 
 
     // Создаем уникальный идентификатор сессии для этого запроса
-    $ip_address = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '';
+    $ip_address = function_exists('mac_site_protection_client_ip')
+        ? mac_site_protection_client_ip()
+        : (isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR'])) : '');
     $user_agent = isset($_SERVER['HTTP_USER_AGENT']) ? sanitize_text_field(wp_unslash($_SERVER['HTTP_USER_AGENT'])) : '';
     $user_agent = substr($user_agent, 0, 2048);
     $session_id = md5($search_query . $ip_address . current_time('Y-m-d H'));
@@ -380,7 +386,7 @@ add_action('pre_get_posts', function ($query) {
     }
 
     // Используем транзиент (временную метку) для предотвращения дублирования
-    $transient_key = 'search_log_' . md5($search_query . $_SERVER['REMOTE_ADDR']);
+    $transient_key = 'search_log_' . md5($search_query . $ip_address);
 
     // Если уже логировали этот запрос в последние 2 минуты - пропускаем
     if (get_transient($transient_key)) {
@@ -432,16 +438,6 @@ function wp_search_logs_page()
     if (!current_user_can('manage_options')) return;
 
     // Экспорт CSV по клику
-    if (isset($_GET['export']) && $_GET['export'] === 'csv') {
-        wp_search_logs_export_csv();
-        return;
-    }
-
-    if (isset($_GET['sitemap_export']) && $_GET['sitemap_export'] === 'csv') {
-        mac_sitemap_logs_export_csv();
-        return;
-    }
-
     global $wpdb;
     $table = $wpdb->prefix . 'search_logs';
     $vin_condition = wp_search_logs_vin_sql_condition();
@@ -493,8 +489,6 @@ function wp_search_logs_page()
     $telegram_settings = mac_search_logs_telegram_settings();
     $telegram_result = get_transient('mac_search_logs_telegram_result_' . get_current_user_id());
     delete_transient('mac_search_logs_telegram_result_' . get_current_user_id());
-    $sitemap_telegram_result = get_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
-    delete_transient('mac_sitemap_logs_telegram_result_' . get_current_user_id());
     $cleanup_result = get_transient('mac_logs_cleanup_result_' . get_current_user_id());
     delete_transient('mac_logs_cleanup_result_' . get_current_user_id());
 ?>
@@ -510,13 +504,6 @@ function wp_search_logs_page()
             <div class="notice notice-info"><p>За сегодня нет VIN-поисков. Отчёт не отправлен.</p></div>
         <?php elseif ($telegram_result && $telegram_result['status'] === 'error'): ?>
             <div class="notice notice-error"><p><?php echo esc_html($telegram_result['message']); ?></p></div>
-        <?php endif; ?>
-        <?php if ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'sent'): ?>
-            <div class="notice notice-success is-dismissible"><p>Отчёт по карте сайта отправлен.</p></div>
-        <?php elseif ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'empty'): ?>
-            <div class="notice notice-info"><p>За сегодня не было просмотров карты сайта. Отчёт не отправлен.</p></div>
-        <?php elseif ($sitemap_telegram_result && $sitemap_telegram_result['status'] === 'error'): ?>
-            <div class="notice notice-error"><p><?php echo esc_html($sitemap_telegram_result['message']); ?></p></div>
         <?php endif; ?>
         <?php if ($cleanup_result): ?>
             <div class="notice notice-success is-dismissible"><p>Удалено записей: <?php echo number_format_i18n((int) $cleanup_result['deleted']); ?>.</p></div>
@@ -542,10 +529,6 @@ function wp_search_logs_page()
                             <td><input id="search-logs-tg-topic" type="text" name="topic_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['topic_id']); ?>"></td>
                         </tr>
                         <tr>
-                            <th scope="row"><label for="search-logs-sitemap-topic">Topic ID карты сайта</label></th>
-                            <td><input id="search-logs-sitemap-topic" type="text" name="sitemap_topic_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['sitemap_topic_id']); ?>"></td>
-                        </tr>
-                        <tr>
                             <th scope="row">Автоматические отчёты</th>
                             <td>
                                 <label><input type="checkbox" name="daily_enabled" value="1" <?php checked($telegram_settings['daily_enabled'], '1'); ?>> Каждый день</label><br>
@@ -560,11 +543,6 @@ function wp_search_logs_page()
                     <?php wp_nonce_field('mac_search_logs_send_telegram'); ?>
                     <input type="hidden" name="action" value="mac_search_logs_send_telegram">
                     <?php submit_button('Отправить отчёт за сегодня', 'secondary'); ?>
-                </form>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                    <?php wp_nonce_field('mac_sitemap_logs_send_telegram'); ?>
-                    <input type="hidden" name="action" value="mac_sitemap_logs_send_telegram">
-                    <?php submit_button('Отправить отчёт по карте сайта за сегодня', 'secondary'); ?>
                 </form>
             </div>
         </div>
@@ -668,7 +646,7 @@ function wp_search_logs_page()
 
         
         <!-- Последние запросы -->
-        <div class="postbox" style="background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
+        <div class="postbox" data-mac-panel="search-logs" style="background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
             <div class="postbox-header" style="background: #f1f1f1; padding: 10px 15px; border-bottom: 1px solid #ccd0d4; display:flex; justify-content:space-between; align-items:center; gap:10px;">
                 <h2 style="margin: 0;">Последние поисковые запросы</h2>
                 <?php mac_logs_cleanup_buttons('search'); ?>
@@ -706,7 +684,7 @@ function wp_search_logs_page()
                 // Пагинация
                 $pages = max(1, ceil($total / $per_page));
                 if ($pages > 1):
-                    echo '<div style="margin-top: 20px; text-align: center;">';
+                    echo '<nav class="mac-pagination" aria-label="Пагинация">';
                     $pagination_pages = array_unique(array_filter([
                         1, 2, 3,
                         $page - 1, $page, $page + 1,
@@ -719,29 +697,25 @@ function wp_search_logs_page()
 
                     foreach ($pagination_pages as $i) {
                         if ($previous_page && $i > $previous_page + 1) {
-                            echo '<span style="margin: 0 5px;">&hellip;</span>';
+                            echo '<span class="mac-pagination-gap">&hellip;</span>';
                         }
 
                         $link = esc_url(add_query_arg('paged', $i, $base_url));
                         if ($i == $page) {
-                            echo '<span style="margin: 0 5px; padding: 5px 10px; background: #0073aa; color: white; border-radius: 3px;">' . $i . '</span>';
+                            echo '<span class="is-current">' . $i . '</span>';
                         } else {
-                            echo '<a style="margin: 0 5px; padding: 5px 10px; background: #f1f1f1; color: #0073aa; text-decoration: none; border-radius: 3px;" href="' . $link . '">' . $i . '</a>';
+                            echo '<a data-mac-page="search-logs" href="' . $link . '">' . $i . '</a>';
                         }
 
                         $previous_page = $i;
                     }
-                    echo '</div>';
+                    echo '</nav>';
                 endif;
                 ?>
             </div>
         </div>
 
-        <?php mac_sitemap_logs_render_admin_table(); ?>
-        <?php mac_crawler_logs_render_admin_table(); ?>
 
-        <!-- Кнопка экспорта -->
-        <p><a class="button button-primary" href="<?php echo esc_url($base_url . '&export=csv'); ?>">Скачать CSV со всеми данными</a></p>
     </div>
 
     <style>
@@ -754,32 +728,23 @@ function wp_search_logs_page()
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
         }
     </style>
+    <script>
+    document.addEventListener('click', function (event) {
+        var link = event.target.closest('.mac-pagination a[data-mac-page="search-logs"]');
+        if (!link) return;
+        event.preventDefault();
+        var panel = document.querySelector('[data-mac-panel="search-logs"]');
+        if (!panel) return;
+        panel.classList.add('is-loading');
+        fetch(link.href, {credentials: 'same-origin'}).then(function (response) { return response.text(); }).then(function (html) {
+            var next = new DOMParser().parseFromString(html, 'text/html').querySelector('[data-mac-panel="search-logs"]');
+            if (!next) throw new Error('Panel not found');
+            panel.replaceWith(next);
+            history.replaceState({}, '', link.href);
+        }).catch(function () { window.location.href = link.href; });
+    });
+    </script>
 <?php
-}
-
-function wp_search_logs_export_csv()
-{
-    if (!current_user_can('manage_options')) return;
-
-    global $wpdb;
-    $table = $wpdb->prefix . 'search_logs';
-    $vin_condition = wp_search_logs_vin_sql_condition();
-    $rows = $wpdb->get_results("SELECT created_at AS date, query, ip_address, user_agent, vin_result FROM $table WHERE $vin_condition ORDER BY id ASC", ARRAY_A);
-
-    nocache_headers();
-    header('Content-Type: text/csv; charset=UTF-8');
-    header('Content-Disposition: attachment; filename=search-log-' . date('Y-m-d') . '.csv');
-
-    $out = fopen('php://output', 'w');
-    // заголовок
-    fputcsv($out, ['date', 'query', 'ip_address', 'user_agent', 'vin_result']);
-    if ($rows) {
-        foreach ($rows as $r) {
-            fputcsv($out, [$r['date'], $r['query'], $r['ip_address'], $r['user_agent'], wp_search_logs_vin_result_label((string) $r['vin_result'])]);
-        }
-    }
-    fclose($out);
-    exit;
 }
 
 // Убираем служебный параметр Elementor из поиска редиректом

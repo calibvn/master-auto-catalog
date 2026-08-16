@@ -33,7 +33,8 @@ class Master_Auto_Catalog_Admin
 
     public static function enqueue_admin_assets()
     {
-        wp_enqueue_style('mac-admin', MAC_PLUGIN_URL . 'assets/admin.css', [], '1.1.0');
+        $style_file = MAC_PLUGIN_PATH . 'assets/admin.css';
+        wp_enqueue_style('mac-admin', MAC_PLUGIN_URL . 'assets/admin.css', [], file_exists($style_file) ? (string) filemtime($style_file) : '1.0.0');
     }
 
     public static function overview_page()
@@ -94,9 +95,10 @@ class Master_Auto_Catalog_Admin
         self::section_header('Логи поиска', 'Статистика поисковых запросов пользователей по каталогу.');
         self::call_function_page('wp_search_logs_page');
         self::help_block('Как использовать', [
-            'Логируются только фронтовые поиски, администраторские запросы исключаются.',
-            'CSV нужен для анализа спроса: какие VIN или модели пользователи ищут чаще всего.',
-            'Очистка удаляет все записи из таблицы search_logs.',
+            'Логируются только VIN из 17 символов: запросы с годом, маркой или обычным текстом не попадают в статистику.',
+            'В таблице видны IP, User-Agent и результат VIN Fallback Search: VIN уже был на сайте, создан через API, не найден или не создался из-за технической ошибки.',
+            'Ежедневный и недельный Telegram-отчёты содержат VIN, число поисков и последний известный результат поиска.',
+            'Кнопки очистки удаляют либо записи старше 90 дней, либо весь журнал поиска.',
         ]);
     }
 

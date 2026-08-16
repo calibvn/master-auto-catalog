@@ -263,3 +263,74 @@
     margin: 8px 0 0;
     max-width: 720px;
 }
+
+.mac-protection-panel { background:#fff; border:1px solid #cbd5e1; border-radius:8px; padding:18px; margin:20px 0; }
+.mac-protection-panel h2 { margin:0; }.mac-panel-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin:0 0 14px; }
+.mac-decision-dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+.mac-dot-good { background:#16a34a; }.mac-dot-warn { background:#f59e0b; }.mac-dot-danger { background:#dc2626; }
+.mac-decision-label { font-size:12px; white-space:nowrap; }.mac-ip-actions { display:flex; flex-wrap:nowrap; gap:3px; min-width:178px; }.mac-ip-actions .button { margin:0; min-width:32px; padding:0 6px; white-space:nowrap; }
+.mac-protection-content { margin:0 20px 0 0; }.mac-protection-settings{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}.mac-setting-card{background:#fff;border:1px solid #cbd5e1;border-radius:8px;padding:18px}.mac-setting-card h2{margin:0 0 14px;font-size:17px}.mac-setting-card label{display:block;margin:10px 0;color:#334155}.mac-setting-card input[type=text],.mac-setting-card input[type=number],.mac-setting-card textarea{box-sizing:border-box;width:100%;margin-top:6px;border:1px solid #cbd5e1;border-radius:6px;padding:7px}.mac-switch-row{display:flex!important;gap:9px;align-items:center}.mac-inline-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.mac-settings-save{grid-column:1/-1}.mac-protection-reset{display:flex;align-items:center;gap:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 16px;margin:16px 0}.mac-protection-reset span{color:#7c2d12;flex:1;font-size:13px}.mac-protection-content .postbox,.mac-protection-content .mac-protection-panel{border-radius:8px!important;box-shadow:none}.mac-protection-content .widefat{table-layout:fixed;width:100%}.mac-protection-content .widefat th,.mac-protection-content .widefat td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle;padding:10px 12px}.mac-protection-content .widefat tbody tr{transition:background .15s}.mac-protection-content .widefat tbody tr:hover{background:#eaf4f2!important}.mac-protection-content .widefat td.mac-copyable{cursor:copy}.mac-protection-content .widefat td.mac-copyable:hover{color:#0f766e}.mac-protection-content .widefat td.mac-copied{background:#d1fae5!important;color:#065f46}.mac-protection-content .widefat td:has(.mac-ip-actions),.mac-protection-content .widefat td:has(.mac-crawler-log-details){white-space:normal;overflow:visible}.mac-protection-content .mac-ip-actions{justify-content:flex-start}.mac-protection-guide{max-width:none}.mac-pagination{display:flex;gap:6px;align-items:center;justify-content:center;margin:16px 0 0}.mac-pagination a,.mac-pagination .is-current{display:inline-flex;align-items:center;justify-content:center;min-width:32px;height:32px;padding:0 9px;border:1px solid #cbd5e1;border-radius:6px;text-decoration:none;color:#0f766e;background:#fff}.mac-pagination a:hover{background:#f0fdfa;border-color:#0f766e}.mac-pagination .is-current{background:#0f766e;color:#fff;border-color:#0f766e;font-weight:600}.mac-pagination-gap{padding:0 2px;color:#64748b}.is-loading{opacity:.55;pointer-events:none}@media(max-width:800px){.mac-protection-settings{grid-template-columns:1fr}.mac-inline-fields{grid-template-columns:1fr}.mac-protection-reset{align-items:flex-start;flex-direction:column}}
+
+/* Unified module pages: scoped to Master Auto Catalog admin screens. */
+body[class*="master-auto-catalog_page"],
+body[class*="toplevel_page_vin-fallback"],
+body[class*="toplevel_page_google-auto-index"],
+body[class*="toplevel_page_heleket"],
+body[class*="toplevel_page_cryptocloud"] { --mac-border:#cbd5e1; --mac-text:#1e293b; --mac-muted:#64748b; --mac-brand:#0f766e; --mac-bg:#f8fafc; }
+
+body[class*="master-auto-catalog_page"] .wrap,
+body[class*="toplevel_page_vin-fallback"] .wrap,
+body[class*="toplevel_page_google-auto-index"] .wrap,
+body[class*="toplevel_page_heleket"] .wrap,
+body[class*="toplevel_page_cryptocloud"] .wrap { max-width:1180px; margin-top:18px; color:var(--mac-text); }
+
+body[class*="master-auto-catalog_page"] .wrap > h1,
+body[class*="toplevel_page_vin-fallback"] .wrap > h1,
+body[class*="toplevel_page_google-auto-index"] .wrap > h1,
+body[class*="toplevel_page_heleket"] .wrap > h1,
+body[class*="toplevel_page_cryptocloud"] .wrap > h1 { background:#fff; border:1px solid var(--mac-border); border-left:5px solid var(--mac-brand); border-radius:8px; padding:18px 22px; margin:16px 0 18px; font-size:25px; line-height:1.2; }
+
+body[class*="master-auto-catalog_page"] .postbox,
+body[class*="toplevel_page_vin-fallback"] .postbox,
+body[class*="toplevel_page_google-auto-index"] .postbox,
+body[class*="toplevel_page_heleket"] .postbox,
+body[class*="toplevel_page_cryptocloud"] .postbox { border:1px solid var(--mac-border) !important; border-radius:8px !important; box-shadow:none; overflow:hidden; background:#fff; }
+
+body[class*="master-auto-catalog_page"] .postbox-header,
+body[class*="toplevel_page_vin-fallback"] .postbox-header,
+body[class*="toplevel_page_google-auto-index"] .postbox-header,
+body[class*="toplevel_page_heleket"] .postbox-header,
+body[class*="toplevel_page_cryptocloud"] .postbox-header { background:#f8fafc !important; border-bottom:1px solid var(--mac-border) !important; min-height:52px; }
+
+body[class*="master-auto-catalog_page"] .form-table,
+body[class*="toplevel_page_vin-fallback"] .form-table,
+body[class*="toplevel_page_google-auto-index"] .form-table,
+body[class*="toplevel_page_heleket"] .form-table,
+body[class*="toplevel_page_cryptocloud"] .form-table { margin:0; max-width:960px; }
+
+body[class*="master-auto-catalog_page"] .form-table th,
+body[class*="toplevel_page_vin-fallback"] .form-table th,
+body[class*="toplevel_page_google-auto-index"] .form-table th,
+body[class*="toplevel_page_heleket"] .form-table th,
+body[class*="toplevel_page_cryptocloud"] .form-table th { color:var(--mac-text); font-weight:600; width:240px; }
+
+body[class*="master-auto-catalog_page"] input[type="text"], body[class*="master-auto-catalog_page"] input[type="number"], body[class*="master-auto-catalog_page"] input[type="password"], body[class*="master-auto-catalog_page"] select, body[class*="master-auto-catalog_page"] textarea,
+body[class*="toplevel_page_vin-fallback"] input, body[class*="toplevel_page_vin-fallback"] select, body[class*="toplevel_page_vin-fallback"] textarea,
+body[class*="toplevel_page_google-auto-index"] input, body[class*="toplevel_page_google-auto-index"] select, body[class*="toplevel_page_google-auto-index"] textarea,
+body[class*="toplevel_page_heleket"] input, body[class*="toplevel_page_heleket"] select, body[class*="toplevel_page_heleket"] textarea,
+body[class*="toplevel_page_cryptocloud"] input, body[class*="toplevel_page_cryptocloud"] select, body[class*="toplevel_page_cryptocloud"] textarea { border-color:var(--mac-border); border-radius:6px; min-height:34px; box-shadow:none; }
+
+body[class*="master-auto-catalog_page"] .widefat, body[class*="toplevel_page_vin-fallback"] .widefat, body[class*="toplevel_page_google-auto-index"] .widefat, body[class*="toplevel_page_heleket"] .widefat, body[class*="toplevel_page_cryptocloud"] .widefat { border:1px solid var(--mac-border); border-radius:8px; overflow:hidden; border-spacing:0; }
+body[class*="master-auto-catalog_page"] .widefat thead td, body[class*="master-auto-catalog_page"] .widefat thead th, body[class*="toplevel_page_vin-fallback"] .widefat thead th, body[class*="toplevel_page_google-auto-index"] .widefat thead th, body[class*="toplevel_page_heleket"] .widefat thead th, body[class*="toplevel_page_cryptocloud"] .widefat thead th { background:#f8fafc; color:#475569; text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
+body[class*="master-auto-catalog_page"] .button-primary, body[class*="toplevel_page_vin-fallback"] .button-primary, body[class*="toplevel_page_google-auto-index"] .button-primary, body[class*="toplevel_page_heleket"] .button-primary, body[class*="toplevel_page_cryptocloud"] .button-primary { background:#0f766e; border-color:#0f766e; border-radius:6px; box-shadow:none; }
+body[class*="master-auto-catalog_page"] .button-primary:hover, body[class*="toplevel_page_vin-fallback"] .button-primary:hover, body[class*="toplevel_page_google-auto-index"] .button-primary:hover, body[class*="toplevel_page_heleket"] .button-primary:hover, body[class*="toplevel_page_cryptocloud"] .button-primary:hover { background:#0d9488; border-color:#0d9488; }
+@media (max-width:782px) { body[class*="master-auto-catalog_page"] .form-table th, body[class*="toplevel_page_vin-fallback"] .form-table th, body[class*="toplevel_page_google-auto-index"] .form-table th, body[class*="toplevel_page_heleket"] .form-table th, body[class*="toplevel_page_cryptocloud"] .form-table th { width:auto; } }
+
+/* WordPress derives submenu body classes from the plugin slug: auto-catalog_page_*. */
+body[class*="auto-catalog_page"] .wrap { max-width:1180px; margin-top:18px; }
+body[class*="auto-catalog_page"] .wrap > h1 { background:#fff; border:1px solid #cbd5e1; border-left:5px solid #0f766e; border-radius:8px; padding:18px 22px; margin:16px 0 18px; font-size:25px; line-height:1.2; }
+body[class*="auto-catalog_page"] .postbox { border:1px solid #cbd5e1 !important; border-radius:8px !important; box-shadow:none; overflow:hidden; }
+body[class*="auto-catalog_page"] .postbox-header { background:#f8fafc !important; border-bottom:1px solid #cbd5e1 !important; min-height:52px; }
+body[class*="auto-catalog_page"] .widefat { border:1px solid #cbd5e1; border-radius:8px; overflow:hidden; border-spacing:0; }
+body[class*="auto-catalog_page"] .widefat thead th { background:#f8fafc; color:#475569; text-transform:uppercase; font-size:11px; letter-spacing:.06em; }
+body[class*="auto-catalog_page"] .wrap:has(.mac-protection-content) { max-width:none; margin-right:20px; }

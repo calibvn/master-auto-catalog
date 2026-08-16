@@ -10,6 +10,145 @@ if (!defined('ABSPATH')) exit;
 // можно менять
 define('CAS_SYNC_BATCH_SIZE', 50);   // размер пачки
 define('CAS_SYNC_TIMEOUT', 120);     // timeout запроса на центральный
+define('CAS_EXCHANGE_LOG_DB_VERSION', '1.0');
+
+function cas_exchange_log_table()
+{
+    global $wpdb;
+    return $wpdb->prefix . 'cas_exchange_logs';
+}
+
+function cas_ensure_exchange_log_table()
+{
+    if (get_option('cas_exchange_log_db_version') === CAS_EXCHANGE_LOG_DB_VERSION) return;
+    global $wpdb;
+    $table = cas_exchange_log_table();
+    $charset_collate = $wpdb->get_charset_collate();
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta("CREATE TABLE {$table} (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        request_id VARCHAR(64) NOT NULL,
+        vin VARCHAR(17) NOT NULL DEFAULT '',
+        direction VARCHAR(20) NOT NULL DEFAULT 'center_to_site',
+        stage VARCHAR(40) NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'info',
+        provider VARCHAR(100) NOT NULL DEFAULT '',
+        product_id BIGINT UNSIGNED NULL,
+        images_total INT UNSIGNED NULL,
+        images_loaded INT UNSIGNED NULL,
+        duration_ms BIGINT UNSIGNED NULL,
+        message TEXT NULL,
+        created_at DATETIME NOT NULL,
+        PRIMARY KEY (id),
+        KEY request_id (request_id),
+        KEY vin (vin),
+        KEY created_at (created_at),
+        KEY status (status)
+    ) {$charset_collate};");
+    update_option('cas_exchange_log_db_version', CAS_EXCHANGE_LOG_DB_VERSION, false);
+}
+add_action('init', 'cas_ensure_exchange_log_table', 3);
+
+function cas_exchange_log(array $event)
+{
+    global $wpdb;
+    cas_ensure_exchange_log_table();
+    $context = $GLOBALS['cas_import_trace_context'] ?? [];
+    $request_id = sanitize_text_field((string)($event['request_id'] ?? ($context['request_id'] ?? '')));
+    if ($request_id === '') return;
+    $wpdb->insert(cas_exchange_log_table(), [
+        'request_id' => substr($request_id, 0, 64),
+        'vin' => substr(sanitize_text_field((string)($event['vin'] ?? ($context['vin'] ?? ''))), 0, 17),
+        'direction' => substr(sanitize_key((string)($event['direction'] ?? 'center_to_site')), 0, 20),
+        'stage' => substr(sanitize_key((string)($event['stage'] ?? 'unknown')), 0, 40),
+        'status' => substr(sanitize_key((string)($event['status'] ?? 'info')), 0, 24),
+        'provider' => substr(sanitize_text_field((string)($event['provider'] ?? '')), 0, 100),
+        'product_id' => !empty($event['product_id']) ? (int)$event['product_id'] : null,
+        'images_total' => isset($event['images_total']) ? max(0, (int)$event['images_total']) : null,
+        'images_loaded' => isset($event['images_loaded']) ? max(0, (int)$event['images_loaded']) : null,
+        'duration_ms' => isset($event['duration_ms']) ? max(0, (int)$event['duration_ms']) : null,
+        'message' => isset($event['message']) ? substr(sanitize_textarea_field((string)$event['message']), 0, 2000) : null,
+        'created_at' => current_time('mysql'),
+    ]);
+}
+add_action('mac_vin_import_trace', 'cas_exchange_log');
+
+function cas_cleanup_exchange_logs()
+{
+    global $wpdb;
+    $cutoff = (new DateTimeImmutable('now', wp_timezone()))->modify('-90 days')->format('Y-m-d H:i:s');
+    $wpdb->query($wpdb->prepare('DELETE FROM ' . cas_exchange_log_table() . ' WHERE created_at < %s', $cutoff));
+}
+add_action('cas_cleanup_exchange_logs_daily', 'cas_cleanup_exchange_logs');
+
+function cas_schedule_exchange_log_cleanup()
+{
+    if (!wp_next_scheduled('cas_cleanup_exchange_logs_daily')) {
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', 'cas_cleanup_exchange_logs_daily');
+    }
+}
+add_action('init', 'cas_schedule_exchange_log_cleanup', 4);
+
+function cas_exchange_logs_pager($total, $page)
+{
+    $pages = max(1, (int)ceil($total / 15));
+    if ($pages < 2) return;
+    $shown = array_unique(array_filter([1, 2, 3, $page - 1, $page, $page + 1, $pages - 2, $pages - 1, $pages], static function ($number) use ($pages) {
+        return $number > 0 && $number <= $pages;
+    }));
+    sort($shown);
+    $last = 0;
+    echo '<nav class="mac-pagination" aria-label="Пагинация журнала обмена">';
+    foreach ($shown as $number) {
+        if ($last && $number > $last + 1) echo '<span class="mac-pagination-gap">&hellip;</span>';
+        echo $number === $page
+            ? '<span class="is-current">' . (int)$number . '</span>'
+            : '<a href="' . esc_url(add_query_arg('cas_log_page', $number)) . '">' . (int)$number . '</a>';
+        $last = $number;
+    }
+    echo '</nav>';
+}
+
+function cas_render_exchange_logs()
+{
+    global $wpdb;
+    cas_ensure_exchange_log_table();
+    $page = max(1, (int)($_GET['cas_log_page'] ?? 1));
+    $per_page = 15;
+    $table = cas_exchange_log_table();
+    $total = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, ($page - 1) * $per_page), ARRAY_A);
+    ?>
+    <div class="mac-protection-content mac-sync-exchange-logs">
+    <section class="mac-protection-panel">
+    <div class="mac-panel-head"><h2>Журнал обмена с центром</h2><span class="description"><?= (int)$total ?> событий</span></div>
+    <p class="description">Показываются последние события по 15 строк. Записи старше 90 дней удаляются автоматически раз в сутки. Ключи и полные ответы внешних API не записываются.</p>
+    <div style="overflow-x:auto"><table class="widefat striped">
+        <thead><tr><th style="width:145px">Время</th><th style="width:145px">VIN</th><th style="width:105px">Этап</th><th style="width:80px">Статус</th><th style="width:115px">Провайдер</th><th style="width:75px">Товар</th><th style="width:75px">Фото</th><th style="width:80px">Время</th><th>Сообщение</th></tr></thead><tbody>
+        <?php if (!$rows): ?><tr><td colspan="9">Событий пока нет.</td></tr><?php endif; ?>
+        <?php foreach ($rows as $row): ?><tr data-request-id="<?= esc_attr($row['request_id']) ?>">
+            <td><?= esc_html($row['created_at']) ?></td><td><code><?= esc_html($row['vin']) ?></code></td><td><?= esc_html($row['stage']) ?></td><td><?= esc_html($row['status']) ?></td><td><?= esc_html($row['provider'] ?: '—') ?></td><td><?= $row['product_id'] ? (int)$row['product_id'] : '—' ?></td><td><?= $row['images_total'] !== null ? (int)$row['images_loaded'] . '/' . (int)$row['images_total'] : '—' ?></td><td><?= $row['duration_ms'] !== null ? esc_html(number_format_i18n(((int)$row['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($row['message'] ?: '—') ?></td>
+        </tr><?php endforeach; ?></tbody>
+    </table></div>
+    <?php cas_exchange_logs_pager($total, $page); ?>
+    </section></div>
+    <script>
+    document.querySelectorAll('.mac-sync-exchange-logs .widefat td').forEach(function (cell) {
+        var value = cell.textContent.trim();
+        if (!value || value === '—') return;
+        cell.classList.add('mac-copyable');
+        cell.title = value;
+        cell.addEventListener('click', function () {
+            if (!navigator.clipboard) return;
+            navigator.clipboard.writeText(value).then(function () {
+                cell.classList.add('mac-copied');
+                setTimeout(function () { cell.classList.remove('mac-copied'); }, 700);
+            });
+        });
+    });
+    </script>
+    <?php
+}
 
 add_action('admin_menu', function () {
     if (defined('MAC_MASTER_ACTIVE') && MAC_MASTER_ACTIVE) {
@@ -168,6 +307,7 @@ function cas_options_page()
                 });
             })();
         </script>
+        <?php cas_render_exchange_logs(); ?>
     </div>
 <?php
 }
@@ -455,7 +595,10 @@ function cas_api_get_all_vehicles($request)
 
 function cas_api_import_vehicle($request)
 {
+    $started_at = microtime(true);
+    $request_id = function_exists('wp_generate_uuid4') ? wp_generate_uuid4() : uniqid('cas_', true);
     if (!class_exists('WooCommerce')) {
+        cas_exchange_log(['request_id' => $request_id, 'stage' => 'rejected', 'status' => 'error', 'message' => 'WooCommerce not available']);
         return ['success' => false, 'message' => 'WooCommerce not available'];
     }
 
@@ -468,6 +611,9 @@ function cas_api_import_vehicle($request)
 
     $vin_norm = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', trim((string)$vin)));
 
+    $GLOBALS['cas_import_trace_context'] = ['request_id' => $request_id, 'vin' => $vin_norm];
+    cas_exchange_log(['stage' => 'received', 'status' => 'started', 'message' => 'Import request accepted from center']);
+
     $existing_id = wc_get_product_id_by_sku($vin_norm);
     if ($existing_id) {
         $product = wc_get_product($existing_id);
@@ -475,7 +621,7 @@ function cas_api_import_vehicle($request)
         $sources = cas_get_product_sources_from_tags($existing_id);
         $source_string = $sources ? implode('|', $sources) : '';
 
-        return [
+        $result = [
             'success' => false,
             'already_exists' => true,
             'message' => 'Vehicle already exists',
@@ -486,6 +632,10 @@ function cas_api_import_vehicle($request)
             'source' => $source_string,
             'donor_modified_at' => cas_get_product_modified_gmt($existing_id),
         ];
+        $image_count = 1 + cas_get_product_gallery_count($existing_id);
+        cas_exchange_log(['stage' => 'completed', 'status' => 'already_exists', 'product_id' => $existing_id, 'images_total' => $image_count, 'images_loaded' => $image_count, 'duration_ms' => round((microtime(true) - $started_at) * 1000), 'message' => 'Vehicle already exists']);
+        unset($GLOBALS['cas_import_trace_context']);
+        return $result;
     }
 
     if (class_exists('VINFallbackSearch')) {
@@ -495,6 +645,8 @@ function cas_api_import_vehicle($request)
             $result = $vinFallback->import_by_vin($vin_norm);
 
             if (!is_array($result)) {
+                cas_exchange_log(['stage' => 'completed', 'status' => 'error', 'duration_ms' => round((microtime(true) - $started_at) * 1000), 'message' => 'Invalid import result']);
+                unset($GLOBALS['cas_import_trace_context']);
                 return ['success' => false, 'message' => 'Invalid import result'];
             }
 
@@ -508,12 +660,18 @@ function cas_api_import_vehicle($request)
                 $result['donor_modified_at'] = cas_get_product_modified_gmt($pid);
             }
 
+            cas_exchange_log(['stage' => 'completed', 'status' => !empty($result['success']) ? 'success' : 'error', 'product_id' => $result['product_id'] ?? null, 'duration_ms' => round((microtime(true) - $started_at) * 1000), 'message' => $result['message'] ?? 'Import finished']);
+            unset($GLOBALS['cas_import_trace_context']);
             return $result;
         }
 
+        cas_exchange_log(['stage' => 'completed', 'status' => 'error', 'duration_ms' => round((microtime(true) - $started_at) * 1000), 'message' => 'VINFallbackSearch::import_by_vin not found']);
+        unset($GLOBALS['cas_import_trace_context']);
         return ['success' => false, 'message' => 'VINFallbackSearch::import_by_vin not found'];
     }
 
+    cas_exchange_log(['stage' => 'completed', 'status' => 'error', 'duration_ms' => round((microtime(true) - $started_at) * 1000), 'message' => 'VINFallbackSearch plugin not loaded']);
+    unset($GLOBALS['cas_import_trace_context']);
     return ['success' => false, 'message' => 'VINFallbackSearch plugin not loaded'];
 }
 

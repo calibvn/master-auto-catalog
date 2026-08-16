@@ -27,6 +27,9 @@ class VIN_Image_Processor
 
         $gallery_ids = [];
         $hashes = [];
+        $loaded_count = 0;
+        $images_started_at = microtime(true);
+        do_action('mac_vin_import_trace', ['stage' => 'images', 'status' => 'started', 'product_id' => $post_id, 'images_total' => count($urls), 'images_loaded' => 0, 'message' => 'Image loading started']);
 
         foreach ($urls as $idx => $url) {
             $att_id = false;
@@ -43,6 +46,7 @@ class VIN_Image_Processor
             }
 
             if ($att_id) {
+                $loaded_count++;
                 if ($idx === 0) {
                     set_post_thumbnail($post_id, $att_id);
                     if (VIN_FS_DEBUG) error_log('[VIN Image Processor] Установлена миниатюра: ' . $att_id);
@@ -56,6 +60,7 @@ class VIN_Image_Processor
             update_post_meta($post_id, '_product_image_gallery', implode(',', $gallery_ids));
             if (VIN_FS_DEBUG) error_log('[VIN Image Processor] Галерея создана: ' . count($gallery_ids) . ' изображений');
         }
+        do_action('mac_vin_import_trace', ['stage' => 'images', 'status' => $loaded_count === count($urls) ? 'success' : 'warning', 'product_id' => $post_id, 'images_total' => count($urls), 'images_loaded' => $loaded_count, 'duration_ms' => round((microtime(true) - $images_started_at) * 1000), 'message' => sprintf('Images loaded: %d of %d', $loaded_count, count($urls))]);
     }
 
     /**

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.28
+ * Version: 1.0.29
  * Author: AskarTech
  */
 
@@ -23,6 +23,7 @@ function mac_load_modules()
 {
     $modules = [
         'wp-search-logs/wp-search-logs.php',
+        'site-protection/site-protection.php',
         'vin-fallback-search/vin-fallback-search.php',
         'google-auto-index/google-auto-index.php',
         'vin-centr_bd/wordpress-sync.php',
@@ -53,6 +54,7 @@ function mac_activate()
     mac_create_sitemap_logs_table();
     mac_create_crawler_logs_table();
     mac_create_crawler_log_samples_table();
+    mac_create_site_protection_tables();
 
     if (!function_exists('gai_activate')) {
         mac_load_modules();
@@ -239,4 +241,32 @@ function mac_ensure_search_logs_schema()
     mac_create_sitemap_logs_table();
     mac_create_crawler_logs_table();
     mac_create_crawler_log_samples_table();
+    mac_create_site_protection_tables();
+}
+
+function mac_create_site_protection_tables()
+{
+    global $wpdb;
+    $charset = $wpdb->get_charset_collate();
+    require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+    dbDelta("CREATE TABLE IF NOT EXISTS {$wpdb->prefix}site_protection_blocks (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, ip_address VARCHAR(45) NOT NULL,
+        reason VARCHAR(100) NOT NULL, created_at DATETIME NOT NULL, expires_at DATETIME NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1, PRIMARY KEY (id),
+        KEY active_ip (ip_address, is_active, expires_at)
+    ) $charset;");
+    dbDelta("CREATE TABLE IF NOT EXISTS {$wpdb->prefix}site_protection_incidents (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, ip_address VARCHAR(45) NOT NULL,
+        rule_key VARCHAR(32) NOT NULL, incident_date DATE NOT NULL, created_at DATETIME NOT NULL,
+        level TINYINT UNSIGNED NOT NULL DEFAULT 1, PRIMARY KEY (id),
+        UNIQUE KEY daily_incident (ip_address, rule_key, incident_date),
+        KEY ip_rule_date (ip_address, rule_key, incident_date)
+    ) $charset;");
+    dbDelta("CREATE TABLE IF NOT EXISTS {$wpdb->prefix}site_protection_events (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, created_at DATETIME NOT NULL,
+        ip_address VARCHAR(45) NOT NULL, rule_key VARCHAR(32) NOT NULL,
+        request_count INT UNSIGNED NOT NULL, threshold_count INT UNSIGNED NOT NULL,
+        action_taken VARCHAR(16) NOT NULL, request_uri TEXT NULL, user_agent TEXT NULL,
+        PRIMARY KEY (id), KEY created_at (created_at), KEY ip_rule (ip_address, rule_key)
+    ) $charset;");
 }

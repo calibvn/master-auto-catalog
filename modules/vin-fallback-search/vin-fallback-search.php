@@ -1418,12 +1418,19 @@ class VINFallbackSearch
         }
 
         foreach ($providers as $provider) {
+            $provider_started_at = microtime(true);
+            $provider_name = get_class($provider);
+            do_action('mac_vin_import_trace', ['stage' => 'provider_search', 'status' => 'started', 'provider' => $provider_name, 'message' => 'Provider search started']);
             try {
                 $item = $provider->search($q);
+                do_action('mac_vin_import_trace', ['stage' => 'provider_search', 'status' => $item && is_array($item) ? 'found' : 'not_found', 'provider' => $provider_name, 'duration_ms' => round((microtime(true) - $provider_started_at) * 1000), 'images_total' => is_array($item['images'] ?? null) ? count($item['images']) : null, 'message' => $item && is_array($item) ? 'Vehicle found' : 'Vehicle not found']);
 
                 if ($item && is_array($item)) {
-                    $provider_class = get_class($provider);
+                    $provider_class = $provider_name;
+                    $creation_started_at = microtime(true);
+                    do_action('mac_vin_import_trace', ['stage' => 'product_create', 'status' => 'started', 'provider' => $provider_name, 'images_total' => is_array($item['images'] ?? null) ? count($item['images']) : 0, 'message' => 'Product creation started']);
                     $product_id = $this->create_or_get_product($item, $provider_class);
+                    do_action('mac_vin_import_trace', ['stage' => 'product_create', 'status' => $product_id ? 'success' : 'error', 'provider' => $provider_name, 'product_id' => $product_id ?: null, 'duration_ms' => round((microtime(true) - $creation_started_at) * 1000), 'images_total' => is_array($item['images'] ?? null) ? count($item['images']) : 0, 'message' => $product_id ? 'Product created or found' : 'Product creation failed']);
 
                     if ($product_id) {
                         // ✅ добавляем метку-источник (НЕ затираем существующие метки)
@@ -1450,6 +1457,7 @@ class VINFallbackSearch
                     }
                 }
             } catch (\Throwable $e) {
+                do_action('mac_vin_import_trace', ['stage' => 'provider_search', 'status' => 'error', 'provider' => $provider_name, 'duration_ms' => round((microtime(true) - $provider_started_at) * 1000), 'message' => $e->getMessage()]);
                 if (defined('VIN_FS_DEBUG') && VIN_FS_DEBUG) {
                     error_log('[VIN Fallback] import_by_vin provider error: ' . $e->getMessage());
                 }
