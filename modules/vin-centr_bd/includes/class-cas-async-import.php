@@ -71,6 +71,7 @@ function cas_async_register_routes(): void {
     };
     register_rest_route('auto-sync/v1', '/import-async', ['methods' => 'POST', 'callback' => 'cas_async_accept', 'permission_callback' => $permission]);
     register_rest_route('auto-sync/v1', '/import-status/(?P<job_id>[a-zA-Z0-9_-]{1,64})', ['methods' => 'GET', 'callback' => 'cas_async_status', 'permission_callback' => $permission]);
+    register_rest_route('auto-sync/v1', '/import-kick', ['methods' => 'POST', 'callback' => 'cas_async_kick', 'permission_callback' => $permission]);
 }
 add_action('rest_api_init', 'cas_async_register_routes');
 
@@ -110,6 +111,30 @@ function cas_async_status(WP_REST_Request $request): WP_REST_Response {
     return $row ? new WP_REST_Response(['success' => true, 'job' => cas_async_public_job($row)], 200) : new WP_REST_Response(['success' => false, 'message' => 'Job not found'], 404);
 }
 
+function cas_async_kick(): WP_REST_Response {
+    cas_async_ensure_table();
+    global $wpdb;
+    ignore_user_abort(true);
+
+    $table = cas_async_table();
+    $staleBefore = date('Y-m-d H:i:s', current_time('timestamp') - 30 * MINUTE_IN_SECONDS);
+    $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='queued', stage='queued', message='Stale worker returned to queue', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s", current_time('mysql'), $staleBefore));
+
+    $active = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE status IN ('claimed','running')");
+    if ($active > 0) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'worker_busy'], 202);
+
+    $jobId = (string)$wpdb->get_var("SELECT job_id FROM {$table} WHERE status IN ('queued','retry') ORDER BY id ASC LIMIT 1");
+    if ($jobId === '') return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'queue_empty'], 200);
+
+    $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='claimed', stage='queued', message='Worker claimed job', updated_at=%s WHERE job_id=%s AND status IN ('queued','retry')", current_time('mysql'), $jobId));
+    if ($claimed !== 1) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'claim_race'], 202);
+
+    $GLOBALS['cas_async_kick_job_id'] = $jobId;
+    cas_process_async_import($jobId);
+    unset($GLOBALS['cas_async_kick_job_id']);
+    return new WP_REST_Response(['success' => true, 'started' => true, 'job_id' => $jobId], 200);
+}
+
 function cas_async_trace_job(array $event): void {
     $jobId = (string)($GLOBALS['cas_async_current_job_id'] ?? ''); if ($jobId === '') return;
     $fields = [];
@@ -134,7 +159,9 @@ function cas_async_send_progress(string $jobId): void {
 }
 
 function cas_process_async_import(string $jobId): void {
-    $row = cas_async_get($jobId); if (!$row || !in_array($row['status'], ['queued', 'retry'], true)) return;
+    $row = cas_async_get($jobId);
+    $kickClaim = $row && $row['status'] === 'claimed' && (string)($GLOBALS['cas_async_kick_job_id'] ?? '') === $jobId;
+    if (!$row || (!in_array($row['status'], ['queued', 'retry'], true) && !$kickClaim)) return;
     cas_async_update($jobId, ['status' => 'running', 'stage' => 'searching', 'started_at' => current_time('mysql'), 'message' => 'Import started']);
     $GLOBALS['cas_async_current_job_id'] = $jobId;
     try {
@@ -160,7 +187,7 @@ function cas_process_async_import(string $jobId): void {
         cas_async_update($jobId, ['status' => 'failed', 'stage' => 'completed', 'message' => $e->getMessage(), 'completed_at' => current_time('mysql')]);
     }
     unset($GLOBALS['cas_async_current_job_id']);
-    cas_async_schedule(CAS_CALLBACK_HOOK, $jobId);
+    cas_send_async_import_callback($jobId);
 }
 add_action(CAS_ASYNC_HOOK, 'cas_process_async_import');
 
