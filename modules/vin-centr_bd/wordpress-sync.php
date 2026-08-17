@@ -11,6 +11,7 @@ if (!defined('ABSPATH')) exit;
 define('CAS_SYNC_BATCH_SIZE', 50);   // размер пачки
 define('CAS_SYNC_TIMEOUT', 120);     // timeout запроса на центральный
 define('CAS_EXCHANGE_LOG_DB_VERSION', '1.0');
+require_once __DIR__ . '/includes/class-cas-async-import.php';
 
 function cas_exchange_log_table()
 {
