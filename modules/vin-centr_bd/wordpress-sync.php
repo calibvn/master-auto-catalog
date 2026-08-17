@@ -10,7 +10,7 @@ if (!defined('ABSPATH')) exit;
 // можно менять
 define('CAS_SYNC_BATCH_SIZE', 50);   // размер пачки
 define('CAS_SYNC_TIMEOUT', 120);     // timeout запроса на центральный
-define('CAS_EXCHANGE_LOG_DB_VERSION', '1.0');
+define('CAS_EXCHANGE_LOG_DB_VERSION', '2.0');
 require_once __DIR__ . '/includes/class-cas-async-import.php';
 
 function cas_exchange_log_table()
@@ -39,7 +39,9 @@ function cas_ensure_exchange_log_table()
         images_loaded INT UNSIGNED NULL,
         duration_ms BIGINT UNSIGNED NULL,
         message TEXT NULL,
+        events_json LONGTEXT NULL,
         created_at DATETIME NOT NULL,
+        updated_at DATETIME NULL,
         PRIMARY KEY (id),
         KEY request_id (request_id),
         KEY vin (vin),
@@ -57,7 +59,8 @@ function cas_exchange_log(array $event)
     $context = $GLOBALS['cas_import_trace_context'] ?? [];
     $request_id = sanitize_text_field((string)($event['request_id'] ?? ($context['request_id'] ?? '')));
     if ($request_id === '') return;
-    $wpdb->insert(cas_exchange_log_table(), [
+    $now = current_time('mysql');
+    $normalized = [
         'request_id' => substr($request_id, 0, 64),
         'vin' => substr(sanitize_text_field((string)($event['vin'] ?? ($context['vin'] ?? ''))), 0, 17),
         'direction' => substr(sanitize_key((string)($event['direction'] ?? 'center_to_site')), 0, 20),
@@ -69,8 +72,50 @@ function cas_exchange_log(array $event)
         'images_loaded' => isset($event['images_loaded']) ? max(0, (int)$event['images_loaded']) : null,
         'duration_ms' => isset($event['duration_ms']) ? max(0, (int)$event['duration_ms']) : null,
         'message' => isset($event['message']) ? substr(sanitize_textarea_field((string)$event['message']), 0, 2000) : null,
-        'created_at' => current_time('mysql'),
-    ]);
+        'created_at' => $now,
+    ];
+    $table = cas_exchange_log_table();
+    $existing = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$table} WHERE request_id = %s ORDER BY id DESC LIMIT 1", $normalized['request_id']), ARRAY_A);
+    $events = [];
+    if ($existing && !empty($existing['events_json'])) {
+        $decoded = json_decode((string)$existing['events_json'], true);
+        if (is_array($decoded)) $events = $decoded;
+    }
+    $events[] = [
+        'time' => $now,
+        'stage' => $normalized['stage'],
+        'status' => $normalized['status'],
+        'provider' => $normalized['provider'],
+        'product_id' => $normalized['product_id'],
+        'images_total' => $normalized['images_total'],
+        'images_loaded' => $normalized['images_loaded'],
+        'duration_ms' => $normalized['duration_ms'],
+        'message' => $normalized['message'],
+    ];
+    $events_json = wp_json_encode($events, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    if (!$existing) {
+        $normalized['events_json'] = $events_json;
+        $normalized['updated_at'] = $now;
+        $wpdb->insert($table, $normalized);
+        return;
+    }
+
+    $update = [
+        'vin' => $normalized['vin'] ?: $existing['vin'],
+        'direction' => $normalized['direction'],
+        'stage' => $normalized['stage'],
+        'status' => $normalized['status'],
+        'provider' => $normalized['provider'] ?: $existing['provider'],
+        'product_id' => $normalized['product_id'] ?: $existing['product_id'],
+        'images_total' => $normalized['images_total'] !== null ? $normalized['images_total'] : $existing['images_total'],
+        'images_loaded' => $normalized['images_loaded'] !== null ? $normalized['images_loaded'] : $existing['images_loaded'],
+        'duration_ms' => $normalized['duration_ms'] !== null ? $normalized['duration_ms'] : $existing['duration_ms'],
+        'message' => $normalized['message'] !== null ? $normalized['message'] : $existing['message'],
+        'events_json' => $events_json,
+        'updated_at' => $now,
+    ];
+    $wpdb->update($table, $update, ['id' => (int)$existing['id']]);
 }
 add_action('mac_vin_import_trace', 'cas_exchange_log');
 
@@ -117,23 +162,61 @@ function cas_render_exchange_logs()
     $page = max(1, (int)($_GET['cas_log_page'] ?? 1));
     $per_page = 15;
     $table = cas_exchange_log_table();
-    $total = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table}");
-    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} ORDER BY id DESC LIMIT %d OFFSET %d", $per_page, ($page - 1) * $per_page), ARRAY_A);
+    $total = (int)$wpdb->get_var("SELECT COUNT(DISTINCT request_id) FROM {$table}");
+    $request_rows = $wpdb->get_results($wpdb->prepare("SELECT request_id, MAX(id) AS last_id FROM {$table} GROUP BY request_id ORDER BY last_id DESC LIMIT %d OFFSET %d", $per_page, ($page - 1) * $per_page), ARRAY_A);
+    $request_ids = array_values(array_filter(array_column($request_rows, 'request_id')));
+    $rows = [];
+    if ($request_ids) {
+        $placeholders = implode(',', array_fill(0, count($request_ids), '%s'));
+        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE request_id IN ({$placeholders}) ORDER BY id ASC", ...$request_ids), ARRAY_A);
+    }
+    $imports = [];
+    foreach ($rows as $row) {
+        $request_id = (string)$row['request_id'];
+        if (!isset($imports[$request_id])) $imports[$request_id] = ['summary' => $row, 'events' => []];
+        $imports[$request_id]['summary'] = $row;
+        $decoded = !empty($row['events_json']) ? json_decode((string)$row['events_json'], true) : null;
+        if (is_array($decoded)) {
+            foreach ($decoded as $detail) if (is_array($detail)) $imports[$request_id]['events'][] = $detail;
+        } else {
+            $imports[$request_id]['events'][] = [
+                'time' => $row['created_at'], 'stage' => $row['stage'], 'status' => $row['status'],
+                'provider' => $row['provider'], 'product_id' => $row['product_id'],
+                'images_total' => $row['images_total'], 'images_loaded' => $row['images_loaded'],
+                'duration_ms' => $row['duration_ms'], 'message' => $row['message'],
+            ];
+        }
+    }
+    $ordered_imports = [];
+    foreach ($request_ids as $request_id) if (isset($imports[$request_id])) $ordered_imports[] = $imports[$request_id];
     ?>
     <div class="mac-protection-content mac-sync-exchange-logs">
     <section class="mac-protection-panel">
-    <div class="mac-panel-head"><h2>Журнал обмена с центром</h2><span class="description"><?= (int)$total ?> событий</span></div>
-    <p class="description">Показываются последние события по 15 строк. Записи старше 90 дней удаляются автоматически раз в сутки. Ключи и полные ответы внешних API не записываются.</p>
+    <div class="mac-panel-head"><h2>Журнал обмена с центром</h2><span class="description"><?= (int)$total ?> импортов</span></div>
+    <p class="description">Одна строка соответствует одному импорту VIN. Технические этапы доступны по кнопке «Подробнее». Записи старше 90 дней удаляются автоматически раз в сутки. Ключи и полные ответы внешних API не записываются.</p>
     <div style="overflow-x:auto"><table class="widefat striped">
-        <thead><tr><th style="width:145px">Время</th><th style="width:145px">VIN</th><th style="width:105px">Этап</th><th style="width:80px">Статус</th><th style="width:115px">Провайдер</th><th style="width:75px">Товар</th><th style="width:75px">Фото</th><th style="width:80px">Время</th><th>Сообщение</th></tr></thead><tbody>
-        <?php if (!$rows): ?><tr><td colspan="9">Событий пока нет.</td></tr><?php endif; ?>
-        <?php foreach ($rows as $row): ?><tr data-request-id="<?= esc_attr($row['request_id']) ?>">
-            <td><?= esc_html($row['created_at']) ?></td><td><code><?= esc_html($row['vin']) ?></code></td><td><?= esc_html($row['stage']) ?></td><td><?= esc_html($row['status']) ?></td><td><?= esc_html($row['provider'] ?: '—') ?></td><td><?= $row['product_id'] ? (int)$row['product_id'] : '—' ?></td><td><?= $row['images_total'] !== null ? (int)$row['images_loaded'] . '/' . (int)$row['images_total'] : '—' ?></td><td><?= $row['duration_ms'] !== null ? esc_html(number_format_i18n(((int)$row['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($row['message'] ?: '—') ?></td>
-        </tr><?php endforeach; ?></tbody>
+        <thead><tr><th style="width:145px">Время</th><th style="width:145px">VIN</th><th style="width:90px">Статус</th><th style="width:150px">Провайдер</th><th style="width:75px">Товар</th><th style="width:75px">Фото</th><th style="width:80px">Время</th><th>Результат</th><th style="width:105px">Этапы</th></tr></thead><tbody>
+        <?php if (!$ordered_imports): ?><tr><td colspan="9">Импортов пока нет.</td></tr><?php endif; ?>
+        <?php foreach ($ordered_imports as $import): $row = $import['summary']; $events = $import['events']; ?>
+        <tr data-request-id="<?= esc_attr($row['request_id']) ?>">
+            <td><?= esc_html($row['updated_at'] ?: $row['created_at']) ?></td><td><code><?= esc_html($row['vin']) ?></code></td><td><?= esc_html($row['status']) ?></td><td><?= esc_html($row['provider'] ?: '—') ?></td><td><?= $row['product_id'] ? (int)$row['product_id'] : '—' ?></td><td><?= $row['images_total'] !== null ? (int)$row['images_loaded'] . '/' . (int)$row['images_total'] : '—' ?></td><td><?= $row['duration_ms'] !== null ? esc_html(number_format_i18n(((int)$row['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($row['message'] ?: '—') ?></td><td><button type="button" class="button-link mac-log-details-toggle" aria-expanded="false">Подробнее (<?= count($events) ?>)</button></td>
+        </tr>
+        <tr class="mac-log-details" hidden><td colspan="9"><div style="overflow-x:auto"><table class="widefat striped"><thead><tr><th>Время</th><th>Этап</th><th>Статус</th><th>Провайдер</th><th>Товар</th><th>Фото</th><th>Время</th><th>Сообщение</th></tr></thead><tbody>
+        <?php foreach ($events as $detail): ?><tr><td><?= esc_html($detail['time'] ?? '—') ?></td><td><?= esc_html($detail['stage'] ?? '—') ?></td><td><?= esc_html($detail['status'] ?? '—') ?></td><td><?= esc_html(($detail['provider'] ?? '') ?: '—') ?></td><td><?= !empty($detail['product_id']) ? (int)$detail['product_id'] : '—' ?></td><td><?= isset($detail['images_total']) ? (int)($detail['images_loaded'] ?? 0) . '/' . (int)$detail['images_total'] : '—' ?></td><td><?= isset($detail['duration_ms']) ? esc_html(number_format_i18n(((int)$detail['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($detail['message'] ?? '—') ?></td></tr><?php endforeach; ?>
+        </tbody></table></div></td></tr>
+        <?php endforeach; ?></tbody>
     </table></div>
     <?php cas_exchange_logs_pager($total, $page); ?>
     </section></div>
     <script>
+    document.querySelectorAll('.mac-sync-exchange-logs .mac-log-details-toggle').forEach(function (button) {
+        button.addEventListener('click', function () {
+            var details = button.closest('tr').nextElementSibling;
+            var open = details.hasAttribute('hidden');
+            if (open) details.removeAttribute('hidden'); else details.setAttribute('hidden', 'hidden');
+            button.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
+    });
     document.querySelectorAll('.mac-sync-exchange-logs .widefat td').forEach(function (cell) {
         var value = cell.textContent.trim();
         if (!value || value === '—') return;
