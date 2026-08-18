@@ -44,6 +44,13 @@ class VIN_Apicar_Provider implements VIN_Provider_Interface
             throw new Exception('API unauthorized (' . $code . '). Проверьте API ключ.');
         }
 
+        // Apicar uses HTTP 404 for a normal "lot for this VIN was not found"
+        // response. It means the provider itself is available, not that it is down.
+        if ($code === 404 && stripos($body, 'lot not found') !== false) {
+            mac_vin_provider_health_signal('apicar', 'Apicar.store', 'up', ['http_code' => $code, 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
+            return null;
+        }
+
         if ($code < 200 || $code >= 300) {
             mac_vin_provider_health_signal('apicar', 'Apicar.store', 'down', ['failure_type' => 'http_error', 'http_code' => $code, 'detail' => mac_vin_provider_response_hint($body, $content_type), 'elapsed_ms' => round((microtime(true) - $started_at) * 1000)]);
             throw new Exception('Apicar.store HTTP error (' . $code . ').');
