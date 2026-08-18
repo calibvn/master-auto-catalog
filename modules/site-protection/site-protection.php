@@ -13,7 +13,7 @@ function mac_site_protection_state_version() {
  * The central agent forwards short-lived local observations to the selected
  * centre and applies only decisions explicitly queued by an administrator.
  */
-const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.0.0';
+const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.1.0';
 const MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK = 'mac_site_protection_central_sync';
 
 add_filter('cron_schedules', function ($schedules) {
@@ -144,11 +144,9 @@ function mac_site_protection_central_apply_settings(array $remote) {
     $settings = mac_site_protection_settings();
     $settings['rate_limit_count'] = max(30, (int)($remote['site_rate_limit'] ?? $settings['rate_limit_count']));
     $settings['xml_rate_limit_count'] = max(2, (int)($remote['xml_rate_limit'] ?? $settings['xml_rate_limit_count']));
-    $settings['unverified_bot_limit'] = max(10, (int)($remote['unverified_bot_limit'] ?? $settings['unverified_bot_limit']));
-    $settings['seo_bot_limit'] = max(5, (int)($remote['seo_bot_limit'] ?? $settings['seo_bot_limit']));
     $settings['rate_limit_minutes'] = max(1, (int)($remote['window_minutes'] ?? $settings['rate_limit_minutes']));
     $settings['xml_rate_limit_minutes'] = $settings['rate_limit_minutes'];
-    $settings['protection_mode'] = 'monitor';
+    $settings['protection_mode'] = !empty($remote['auto_block_enabled']) ? 'enforce' : 'monitor';
     update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
 }
 
@@ -217,9 +215,8 @@ function mac_site_protection_settings() {
         // Start new installations in observation mode. It records threshold
         // crossings but never returns 429 until an administrator enables it.
         'protection_mode' => 'monitor',
-        'rate_limit_count' => '300', 'rate_limit_minutes' => '10',
-        'unverified_bot_limit' => '60', 'seo_bot_limit' => '30',
-        'xml_rate_limit_count' => '30', 'xml_rate_limit_minutes' => '10',
+        'rate_limit_count' => '200', 'rate_limit_minutes' => '10',
+        'xml_rate_limit_count' => '5', 'xml_rate_limit_minutes' => '10',
         'ip_whitelist' => '', 'ua_whitelist' => 'MasterAutoCentr/DeletedVinExport', 'telegram_topic_id' => '27659',
     ]);
 }
@@ -314,17 +311,21 @@ function mac_site_protection_expire_blocks() {
     $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= %s", current_time('mysql')));
 }
 function mac_site_protection_escalation_minutes($level) {
-    // Permanent blocks are always an explicit administrator decision.
-    return [1 => 60, 2 => DAY_IN_SECONDS / MINUTE_IN_SECONDS, 3 => 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS, 4 => 30 * DAY_IN_SECONDS / MINUTE_IN_SECONDS, 5 => 30 * DAY_IN_SECONDS / MINUTE_IN_SECONDS][$level] ?? 30 * DAY_IN_SECONDS / MINUTE_IN_SECONDS;
+    return [
+        1 => 10,
+        2 => HOUR_IN_SECONDS / MINUTE_IN_SECONDS,
+        3 => DAY_IN_SECONDS / MINUTE_IN_SECONDS,
+        4 => 30 * DAY_IN_SECONDS / MINUTE_IN_SECONDS,
+        5 => null,
+    ][$level] ?? null;
 }
 function mac_site_protection_register_incident($ip, $rule_key) {
     global $wpdb;
     $today = current_time('Y-m-d'); $from = wp_date('Y-m-d', current_time('timestamp') - 30 * DAY_IN_SECONDS);
     $table = $wpdb->prefix . 'site_protection_incidents';
-    $exists = (int) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$table} WHERE ip_address=%s AND rule_key=%s AND incident_date=%s", $ip, $rule_key, $today));
-    if (!$exists) $wpdb->insert($table, ['ip_address'=>$ip,'rule_key'=>$rule_key,'incident_date'=>$today,'created_at'=>current_time('mysql'),'level'=>1], ['%s','%s','%s','%s','%d']);
-    $days = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT incident_date) FROM {$table} WHERE ip_address=%s AND rule_key=%s AND incident_date >= %s", $ip, $rule_key, $from));
-    return min(5, max(1, $days));
+    $wpdb->insert($table, ['ip_address'=>$ip,'rule_key'=>$rule_key,'incident_date'=>$today,'created_at'=>current_time('mysql'),'level'=>1], ['%s','%s','%s','%s','%d']);
+    $incidents = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE ip_address=%s AND rule_key=%s AND incident_date >= %s", $ip, $rule_key, $from));
+    return min(5, max(1, $incidents));
 }
 function mac_site_protection_block($ip, $reason, $minutes) {
     global $wpdb;
@@ -453,21 +454,6 @@ function mac_site_protection_handle_threshold($ip, $rule_key, $count, $limit, $m
         return;
     }
 
-    $throttle_key = mac_site_protection_state_key('mac_sp_throttle', $ip . '|' . $rule_key);
-    $seen_key = mac_site_protection_state_key('mac_sp_throttle_seen', $ip . '|' . $rule_key);
-    if (get_transient($throttle_key) !== false) {
-        mac_site_protection_reject(5 * MINUTE_IN_SECONDS, 'Too many requests. Please try again in a few minutes.');
-    }
-
-    // The first burst receives a short throttle only. If this IP breaches
-    // again after that throttle, it enters the temporary-block ladder.
-    if (get_transient($seen_key) === false) {
-        set_transient($seen_key, '1', DAY_IN_SECONDS);
-        set_transient($throttle_key, '1', 5 * MINUTE_IN_SECONDS);
-        mac_site_protection_log_event($ip, $rule_key, $count, $limit, 'throttle', $ua);
-        mac_site_protection_reject(5 * MINUTE_IN_SECONDS, 'Too many requests. Please try again in a few minutes.');
-    }
-
     $event_key = mac_site_protection_state_key('mac_sp_block_event', $ip . '|' . $rule_key);
     if (get_transient($event_key) === false) {
         set_transient($event_key, '1', $minutes * MINUTE_IN_SECONDS);
@@ -475,8 +461,9 @@ function mac_site_protection_handle_threshold($ip, $rule_key, $count, $limit, $m
         $block_minutes = mac_site_protection_escalation_minutes($level);
         mac_site_protection_block($ip, 'Intensive access, level ' . $level, $block_minutes);
         mac_site_protection_log_event($ip, $rule_key, $count, $limit, 'block', $ua);
+        mac_site_protection_reject($block_minutes === null ? DAY_IN_SECONDS : $block_minutes * MINUTE_IN_SECONDS, 'Too many requests. Please try again later.');
     }
-    mac_site_protection_reject(mac_site_protection_escalation_minutes(1) * MINUTE_IN_SECONDS, 'Access temporarily restricted. Please try again later.');
+    mac_site_protection_reject(60, 'Too many requests. Please try again later.');
 }
 
 function mac_site_protection_enforce_v2($wp = null) {
@@ -497,10 +484,6 @@ function mac_site_protection_enforce_v2($wp = null) {
     if (mac_site_protection_blocked($ip)) mac_site_protection_reject(3600, 'Access temporarily restricted. Please try again later.');
 
     $s = mac_site_protection_settings();
-    // With the central agent configured, threshold rules become observation
-    // signals. Only an explicit central command can create a real block.
-    $central = mac_site_protection_central_config();
-    if ($central['url'] !== '' && $central['api_key'] !== '') $s['protection_mode'] = 'monitor';
     $path = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
     $is_xml = mac_sitemap_logs_is_xml_request($path);
     $class = mac_site_protection_traffic_class($ua, $ip);
@@ -520,7 +503,7 @@ function mac_site_protection_enforce_v2($wp = null) {
     if ($is_xml && $s['xml_rate_limit_enabled'] === '1') {
         $minutes = max(1, (int) $s['xml_rate_limit_minutes']);
         $limit = max(2, (int) $s['xml_rate_limit_count']);
-        $rule_key = 'xml_rate';
+        $rule_key = 'xml_rate_auto';
         $subject = mac_site_protection_subject($ip, $class);
         $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
         if ($count > $limit) {
@@ -532,14 +515,8 @@ function mac_site_protection_enforce_v2($wp = null) {
 
     if ($s['rate_limit_enabled'] !== '1' || $is_xml || !mac_site_protection_is_meaningful_request($path)) return;
     $minutes = max(1, (int) $s['rate_limit_minutes']);
-    $limit = $class === 'seo'
-        ? max(5, (int) $s['seo_bot_limit'])
-        : ($class === 'unverified_bot' ? max(10, (int) $s['unverified_bot_limit']) : max(30, (int) $s['rate_limit_count']));
-    if ($class === 'visitor' && mac_site_protection_browser_signal_score($ua) >= 2) {
-        $class = 'suspicious_browser';
-        $limit = max(10, (int) $s['unverified_bot_limit']);
-    }
-    $rule_key = 'site_' . $class;
+    $limit = max(30, (int) $s['rate_limit_count']);
+    $rule_key = 'site_rate_auto';
     $subject = mac_site_protection_subject($ip, $class);
     $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
     if ($count <= $limit) return;
@@ -554,7 +531,6 @@ add_action('admin_post_mac_site_protection_save', function () {
         'xml_rate_limit_enabled' => isset($_POST['xml_rate_limit_enabled']) ? '1' : '0', 'rate_limit_enabled' => isset($_POST['rate_limit_enabled']) ? '1' : '0',
         'protection_mode' => ($_POST['protection_mode'] ?? 'monitor') === 'enforce' ? 'enforce' : 'monitor',
         'rate_limit_count' => max(30, (int) ($_POST['rate_limit_count'] ?? 300)), 'rate_limit_minutes' => max(1, (int) ($_POST['rate_limit_minutes'] ?? 10)), 'xml_rate_limit_count' => max(2, (int) ($_POST['xml_rate_limit_count'] ?? 30)), 'xml_rate_limit_minutes' => max(1, (int) ($_POST['xml_rate_limit_minutes'] ?? 10)),
-        'unverified_bot_limit' => max(10, (int) ($_POST['unverified_bot_limit'] ?? 60)), 'seo_bot_limit' => max(5, (int) ($_POST['seo_bot_limit'] ?? 30)),
         'ip_whitelist' => sanitize_textarea_field(wp_unslash($_POST['ip_whitelist'] ?? '')), 'ua_whitelist' => sanitize_textarea_field(wp_unslash($_POST['ua_whitelist'] ?? '')),
         'telegram_topic_id' => preg_replace('/[^0-9]/', '', (string) ($_POST['telegram_topic_id'] ?? '27659')),
     ], false);
@@ -586,8 +562,8 @@ function mac_site_protection_page_v2() {
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mac-protection-settings">
             <?php wp_nonce_field('mac_site_protection_save'); ?><input type="hidden" name="action" value="mac_site_protection_save">
             <section class="mac-setting-card"><h2>Режим работы</h2><label>Защита<select name="protection_mode"><option value="monitor" <?php selected($s['protection_mode'], 'monitor'); ?>>Только логировать</option><option value="enforce" <?php selected($s['protection_mode'], 'enforce'); ?>>Блокировать по правилам</option></select></label><p class="description">Начните с режима «Только логировать» на 7 дней. В нём видны превышения, но посетители не получают 429.</p></section>
-            <section class="mac-setting-card"><h2>Пороги по типу трафика</h2><div class="mac-inline-fields"><label>Посетитель<input type="number" name="rate_limit_count" value="<?php echo esc_attr($s['rate_limit_count']); ?>" min="30"></label><label>Неофициальный бот<input type="number" name="unverified_bot_limit" value="<?php echo esc_attr($s['unverified_bot_limit']); ?>" min="10"></label><label>SEO-краулер<input type="number" name="seo_bot_limit" value="<?php echo esc_attr($s['seo_bot_limit']); ?>" min="5"></label><label>Окно, минут<input type="number" name="rate_limit_minutes" value="<?php echo esc_attr($s['rate_limit_minutes']); ?>" min="1"></label></div><p class="description">Официальные боты Google, Bing и Яндекса проходят проверку DNS и не ограничиваются. Постоянная блокировка — только вручную.</p></section>
-            <section class="mac-setting-card"><h2>Правила XML</h2><label class="mac-switch-row"><input type="checkbox" name="xml_rate_limit_enabled" <?php checked($s['xml_rate_limit_enabled'], '1'); ?>><span>Ограничивать интенсивный просмотр XML-карт</span></label><div class="mac-inline-fields"><label>XML запросов<input type="number" name="xml_rate_limit_count" value="<?php echo esc_attr($s['xml_rate_limit_count']); ?>" min="2"></label><label>За минут<input type="number" name="xml_rate_limit_minutes" value="<?php echo esc_attr($s['xml_rate_limit_minutes']); ?>" min="1"></label></div><label class="mac-switch-row"><input type="checkbox" name="rate_limit_enabled" <?php checked($s['rate_limit_enabled'], '1'); ?>><span>Включить защиту интенсивных обходов</span></label><p class="description">Первое превышение только фиксируется. Повторные нарушения в разные дни усиливают временную блокировку: 1 ч. → 24 ч. → 7 дн. → 30 дн. Постоянная блокировка возможна только вручную.</p></section>
+            <section class="mac-setting-card"><h2>Порог обходов страниц</h2><div class="mac-inline-fields"><label>Запросов<input type="number" name="rate_limit_count" value="<?php echo esc_attr($s['rate_limit_count']); ?>" min="30"></label><label>Окно, минут<input type="number" name="rate_limit_minutes" value="<?php echo esc_attr($s['rate_limit_minutes']); ?>" min="1"></label></div><p class="description">Для всех неофициальных источников действует единый порог. Официальные Google, Bing и Яндекс после DNS-проверки не ограничиваются.</p></section>
+            <section class="mac-setting-card"><h2>Правила XML</h2><label class="mac-switch-row"><input type="checkbox" name="xml_rate_limit_enabled" <?php checked($s['xml_rate_limit_enabled'], '1'); ?>><span>Ограничивать интенсивный просмотр XML-карт</span></label><div class="mac-inline-fields"><label>XML запросов<input type="number" name="xml_rate_limit_count" value="<?php echo esc_attr($s['xml_rate_limit_count']); ?>" min="2"></label><label>За минут<input type="number" name="xml_rate_limit_minutes" value="<?php echo esc_attr($s['xml_rate_limit_minutes']); ?>" min="1"></label></div><label class="mac-switch-row"><input type="checkbox" name="rate_limit_enabled" <?php checked($s['rate_limit_enabled'], '1'); ?>><span>Включить защиту интенсивных обходов</span></label><p class="description">При синхронизации с центром эти значения и режим защиты управляются из центра. Лестница блокировок: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</p></section>
             <section class="mac-setting-card"><h2>Исключения и отчёты</h2><label>Topic ID Telegram<input type="text" name="telegram_topic_id" value="<?php echo esc_attr($s['telegram_topic_id']); ?>"></label><label>WhiteList IP<textarea name="ip_whitelist" rows="4"><?php echo esc_textarea($s['ip_whitelist']); ?></textarea></label><label>WhiteList User-Agent<textarea name="ua_whitelist" rows="4"><?php echo esc_textarea($s['ua_whitelist']); ?></textarea></label></section>
             <div class="mac-settings-save"><button class="button button-primary">Сохранить изменения</button></div>
         </form>
