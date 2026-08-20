@@ -150,9 +150,20 @@ function mac_site_protection_central_apply_settings(array $remote) {
     update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
 }
 
+function mac_site_protection_central_save_sync_status(array $status) {
+    $status['attempted_at'] = current_time('mysql');
+    update_option('mac_site_protection_central_last_sync', $status, false);
+}
+
 function mac_site_protection_central_sync() {
     $config = mac_site_protection_central_config();
-    if ($config['url'] === '' || $config['api_key'] === '') return;
+    if ($config['url'] === '' || $config['api_key'] === '') {
+        mac_site_protection_central_save_sync_status([
+            'state' => 'not_configured',
+            'error' => 'Не заполнены адрес центра или API key.',
+        ]);
+        return;
+    }
 
     global $wpdb;
     $eventsTable = $wpdb->prefix . 'site_protection_events';
@@ -176,9 +187,31 @@ function mac_site_protection_central_sync() {
     }
 
     $response = wp_remote_post($config['url'] . '/api/protection.php', ['timeout' => 20, 'headers' => ['Content-Type' => 'application/json', 'X-API-Key' => $config['api_key']], 'body' => wp_json_encode($payload)]);
-    if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) return;
+    if (is_wp_error($response)) {
+        mac_site_protection_central_save_sync_status([
+            'state' => 'request_error',
+            'error' => $response->get_error_message(),
+        ]);
+        return;
+    }
+    $responseCode = (int) wp_remote_retrieve_response_code($response);
+    if ($responseCode !== 200) {
+        mac_site_protection_central_save_sync_status([
+            'state' => 'http_error',
+            'http_code' => $responseCode,
+            'error' => wp_strip_all_tags((string) wp_remote_retrieve_body($response)),
+        ]);
+        return;
+    }
     $body = json_decode((string) wp_remote_retrieve_body($response), true);
-    if (!is_array($body) || empty($body['success'])) return;
+    if (!is_array($body) || empty($body['success'])) {
+        mac_site_protection_central_save_sync_status([
+            'state' => 'invalid_response',
+            'http_code' => $responseCode,
+            'error' => 'Центр вернул некорректный ответ.',
+        ]);
+        return;
+    }
 
     if (!empty($body['settings']) && is_array($body['settings'])) mac_site_protection_central_apply_settings($body['settings']);
 
@@ -196,12 +229,61 @@ function mac_site_protection_central_sync() {
     $cutoff = wp_date('Y-m-d', time() - 2 * DAY_IN_SECONDS);
     $wpdb->query($wpdb->prepare("DELETE FROM {$crawlerTable} WHERE log_date < %s", $cutoff));
     $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->prefix}crawler_log_samples WHERE log_date < %s", $cutoff));
+    $receivedCommandIds = [];
     $newAcks = [];
     foreach ((array) ($body['commands'] ?? []) as $command) {
-        [$ok, $message] = mac_site_protection_central_apply_command((array) $command);
-        $newAcks[] = ['command_id' => (int) ($command['id'] ?? 0), 'ok' => $ok, 'message' => $message];
+        $commandId = (int) ($command['id'] ?? 0);
+        if ($commandId > 0) $receivedCommandIds[] = $commandId;
+        try {
+            [$ok, $message] = mac_site_protection_central_apply_command((array) $command);
+        } catch (Throwable $error) {
+            $ok = false;
+            $message = $error->getMessage();
+        }
+        $newAcks[] = ['command_id' => $commandId, 'ok' => $ok, 'message' => $message];
+    }
+
+    // Confirm the result immediately. The old protocol waited for the next
+    // five-minute agent run, leaving the central queue ambiguous for too long.
+    $commandResults = array_map(static function ($ack) {
+        return [
+            'id' => (int) $ack['command_id'],
+            'ok' => !empty($ack['ok']),
+            'message' => (string) $ack['message'],
+        ];
+    }, $newAcks);
+    $ackState = 'not_required';
+    if ($newAcks) {
+        $ackResponse = wp_remote_post($config['url'] . '/api/protection.php', [
+            'timeout' => 20,
+            'headers' => ['Content-Type' => 'application/json', 'X-API-Key' => $config['api_key']],
+            'body' => wp_json_encode([
+                'agent_version' => MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION,
+                'events' => [], 'sitemap_logs' => [], 'crawler_daily' => [], 'vin_api_events' => [],
+                'command_acks' => $newAcks,
+            ]),
+        ]);
+        if (!is_wp_error($ackResponse) && wp_remote_retrieve_response_code($ackResponse) === 200) {
+            $ackBody = json_decode((string) wp_remote_retrieve_body($ackResponse), true);
+            if (is_array($ackBody) && !empty($ackBody['success'])) {
+                $newAcks = [];
+                $ackState = 'confirmed';
+            } else {
+                $ackState = 'invalid_response';
+            }
+        } else {
+            $ackState = is_wp_error($ackResponse) ? $ackResponse->get_error_message() : 'HTTP ' . (int) wp_remote_retrieve_response_code($ackResponse);
+        }
     }
     update_option('mac_site_protection_central_acks', $newAcks, false);
+    mac_site_protection_central_save_sync_status([
+        'state' => 'success',
+        'http_code' => $responseCode,
+        'received_commands' => $receivedCommandIds,
+        'command_results' => $commandResults,
+        'ack_state' => $ackState,
+        'error' => '',
+    ]);
 }
 add_action(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK, 'mac_site_protection_central_sync');
 
@@ -217,7 +299,7 @@ function mac_site_protection_settings() {
         'protection_mode' => 'monitor',
         'rate_limit_count' => '200', 'rate_limit_minutes' => '10',
         'xml_rate_limit_count' => '5', 'xml_rate_limit_minutes' => '10',
-        'ip_whitelist' => '', 'ua_whitelist' => 'MasterAutoCentr/DeletedVinExport', 'telegram_topic_id' => '27659',
+        'ip_whitelist' => '', 'ua_whitelist' => '', 'telegram_topic_id' => '27659',
     ]);
 }
 
@@ -547,10 +629,18 @@ function mac_site_protection_page_v2() {
     $settings = mac_site_protection_settings();
     $blocks = $wpdb->get_results("SELECT ip_address, reason, created_at, expires_at FROM {$wpdb->prefix}site_protection_blocks WHERE is_active=1 ORDER BY id DESC", ARRAY_A);
     $config = mac_site_protection_central_config();
+    $syncStatus = (array) get_option('mac_site_protection_central_last_sync', []);
+    $syncStateLabels = [
+        'success' => 'Связь с центром установлена',
+        'not_configured' => 'Подключение не настроено',
+        'request_error' => 'Ошибка соединения с центром',
+        'http_error' => 'Центр вернул ошибку HTTP',
+        'invalid_response' => 'Некорректный ответ центра',
+    ];
     ?>
     <div class="wrap mac-protection-content">
         <div class="mac-section-title"><h1>Защита сайта</h1><p>Сайт работает как исполнитель: история и ручные решения находятся в центральном сайте; очередь проверяется примерно раз в 5 минут.</p></div>
-        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p></section>
+        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p><?php if ($syncStatus): ?><p><strong>Последняя синхронизация:</strong> <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><br><strong>Результат:</strong> <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'Неизвестно'); ?><?php if (!empty($syncStatus['http_code'])): ?> (HTTP <?php echo (int) $syncStatus['http_code']; ?>)<?php endif; ?><?php if (!empty($syncStatus['received_commands'])): ?><br><strong>Команды от центра:</strong> <?php echo esc_html(implode(', ', array_map('intval', (array) $syncStatus['received_commands']))); ?><?php endif; ?><?php if (!empty($syncStatus['command_results'])): ?><br><strong>Применение:</strong> <?php foreach ((array) $syncStatus['command_results'] as $result): ?><?php echo esc_html('#' . (int) ($result['id'] ?? 0) . ': ' . (!empty($result['ok']) ? 'успешно' : 'ошибка') . (!empty($result['message']) ? ' — ' . (string) $result['message'] : '') . ' '); ?><?php endforeach; ?><?php endif; ?><?php if (!empty($syncStatus['ack_state']) && $syncStatus['ack_state'] !== 'not_required'): ?><br><strong>Подтверждение центру:</strong> <?php echo esc_html($syncStatus['ack_state'] === 'confirmed' ? 'отправлено' : (string) $syncStatus['ack_state']); ?><?php endif; ?><?php if (!empty($syncStatus['error'])): ?><br><strong>Ошибка:</strong> <?php echo esc_html(wp_trim_words((string) $syncStatus['error'], 30, '…')); ?><?php endif; ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form></section>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>WhiteList IP</h2></div><p><?php echo $settings['ip_whitelist'] !== '' ? nl2br(esc_html($settings['ip_whitelist'])) : 'Пусто'; ?></p></section>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="4">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
     </div>
@@ -604,6 +694,14 @@ function mac_site_protection_page_v2() {
 <?php }
 
 add_action('admin_menu', function () { if (defined('MAC_MASTER_ACTIVE') && MAC_MASTER_ACTIVE) add_submenu_page('master-auto-catalog', 'Защита сайта', 'Защита сайта', 'manage_options', 'mac-site-protection', 'mac_site_protection_page_v2'); }, 30);
+
+add_action('admin_post_mac_site_protection_sync_now', function () {
+    if (!current_user_can('manage_options')) wp_die('Access denied.');
+    check_admin_referer('mac_site_protection_sync_now');
+    mac_site_protection_central_sync();
+    wp_safe_redirect(admin_url('admin.php?page=mac-site-protection&sync_now=1'));
+    exit;
+});
 
 add_action('admin_post_mac_site_protection_reset', function () {
     if (!current_user_can('manage_options')) wp_die('Access denied.');

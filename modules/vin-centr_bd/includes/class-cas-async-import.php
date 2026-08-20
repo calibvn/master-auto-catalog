@@ -3,6 +3,7 @@ defined('ABSPATH') || exit;
 
 const CAS_ASYNC_DB_VERSION = '1.0';
 const CAS_ASYNC_HOOK = 'cas_process_async_import';
+const CAS_WORKER_HOOK = 'cas_async_import_worker';
 const CAS_CALLBACK_HOOK = 'cas_send_async_import_callback';
 
 function cas_async_table(): string { global $wpdb; return $wpdb->prefix . 'cas_import_jobs'; }
@@ -63,6 +64,28 @@ function cas_async_schedule(string $hook, string $jobId, int $delay = 0): void {
     if (function_exists('spawn_cron')) spawn_cron(time());
 }
 
+/**
+ * Queue a single site-wide worker. Import jobs must never be scheduled one
+ * worker per VIN: all jobs for this WordPress site are claimed by
+ * cas_async_kick() one at a time.
+ */
+function cas_async_schedule_worker(int $delay = 1): void {
+    $delay = max(1, $delay);
+    if (function_exists('as_schedule_single_action')) {
+        as_schedule_single_action(time() + $delay, CAS_WORKER_HOOK, [], 'master-auto-catalog', true);
+        return;
+    }
+    if (!wp_next_scheduled(CAS_WORKER_HOOK)) {
+        wp_schedule_single_event(time() + $delay, CAS_WORKER_HOOK);
+    }
+    if (function_exists('spawn_cron')) spawn_cron(time());
+}
+
+function cas_async_run_worker(): void {
+    cas_async_kick();
+}
+add_action(CAS_WORKER_HOOK, 'cas_async_run_worker');
+
 function cas_async_register_routes(): void {
     $permission = static function (WP_REST_Request $request): bool {
         $configured = trim((string)get_option('cas_sync_key', ''));
@@ -96,13 +119,13 @@ function cas_async_accept(WP_REST_Request $request): WP_REST_Response {
     if (strlen($vin) !== 17 || $jobId === '') return new WP_REST_Response(['success' => false, 'message' => 'Invalid VIN or job_id'], 400);
     $existing = cas_async_get($jobId);
     if ($existing) {
-        if (in_array($existing['status'], ['queued', 'retry'], true)) cas_async_schedule(CAS_ASYNC_HOOK, $jobId);
+        if (in_array($existing['status'], ['queued', 'retry'], true)) cas_async_schedule_worker();
         return new WP_REST_Response(['success' => true, 'accepted' => true, 'duplicate_job' => true, 'job' => cas_async_public_job($existing)], 202);
     }
     $now = current_time('mysql');
     $ok = $wpdb->insert(cas_async_table(), ['job_id' => substr($jobId,0,64), 'vin' => $vin, 'batch_id' => substr($batchId,0,64), 'status' => 'queued', 'stage' => 'queued', 'message' => 'Import queued', 'created_at' => $now, 'updated_at' => $now]);
     if (!$ok) return new WP_REST_Response(['success' => false, 'message' => 'Unable to save import job'], 500);
-    cas_async_schedule(CAS_ASYNC_HOOK, $jobId);
+    cas_async_schedule_worker();
     return new WP_REST_Response(['success' => true, 'accepted' => true, 'job_id' => $jobId, 'vin' => $vin, 'status' => 'queued', 'stage' => 'queued'], 202);
 }
 
@@ -161,7 +184,10 @@ function cas_async_send_progress(string $jobId): void {
 function cas_process_async_import(string $jobId): void {
     $row = cas_async_get($jobId);
     $kickClaim = $row && $row['status'] === 'claimed' && (string)($GLOBALS['cas_async_kick_job_id'] ?? '') === $jobId;
-    if (!$row || (!in_array($row['status'], ['queued', 'retry'], true) && !$kickClaim)) return;
+    // A job can run only after the atomic claim in cas_async_kick(). Legacy
+    // per-job scheduled actions are deliberately ignored to prevent parallel
+    // imports on the same site.
+    if (!$row || !$kickClaim) return;
     cas_async_update($jobId, ['status' => 'running', 'stage' => 'searching', 'started_at' => current_time('mysql'), 'message' => 'Import started']);
     $GLOBALS['cas_async_current_job_id'] = $jobId;
     try {
@@ -188,6 +214,7 @@ function cas_process_async_import(string $jobId): void {
     }
     unset($GLOBALS['cas_async_current_job_id']);
     cas_send_async_import_callback($jobId);
+    cas_async_schedule_worker(2);
 }
 add_action(CAS_ASYNC_HOOK, 'cas_process_async_import');
 
