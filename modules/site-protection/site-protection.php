@@ -134,8 +134,8 @@ function mac_site_protection_central_apply_command(array $command) {
         'reason' => substr(trim((string) ($command['reason'] ?? 'Решение центра')), 0, 100),
         'created_at' => current_time('mysql'),
         'expires_at' => $expiresAt !== '' ? $expiresAt : null,
-        'is_active' => 1,
-    ], ['%s', '%s', '%s', '%s', '%d']);
+        'is_active' => 1, 'blocked_hits' => 0, 'last_blocked_at' => null,
+    ], ['%s', '%s', '%s', '%s', '%d', '%d', '%s']);
     delete_transient(mac_site_protection_state_key('mac_sp_blocked', $subject));
     return [true, $expiresAt === '' ? 'Заблокирован навсегда' : 'Заблокирован до ' . $expiresAt];
 }
@@ -388,6 +388,17 @@ function mac_site_protection_blocked($ip) {
     set_transient($key, $blocked ? '1' : '0', MINUTE_IN_SECONDS);
     return $blocked;
 }
+
+function mac_site_protection_record_block_hit($ip) {
+    global $wpdb;
+    $network = mac_site_protection_ipv6_network($ip);
+    $subjects = array_values(array_unique(array_filter([$ip, $network])));
+    if (!$subjects) return;
+    $placeholders = implode(',', array_fill(0, count($subjects), '%s'));
+    $query = "UPDATE {$wpdb->prefix}site_protection_blocks SET blocked_hits=blocked_hits+1, last_blocked_at=%s WHERE ip_address IN ({$placeholders}) AND is_active=1 AND (expires_at IS NULL OR expires_at>%s)";
+    $wpdb->query($wpdb->prepare($query, ...array_merge([current_time('mysql')], $subjects, [current_time('mysql')])));
+}
+
 function mac_site_protection_expire_blocks() {
     global $wpdb;
     $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= %s", current_time('mysql')));
@@ -563,7 +574,10 @@ function mac_site_protection_enforce_v2($wp = null) {
         mac_site_protection_expire_blocks();
         set_transient('mac_sp_expire_checked', '1', 5 * MINUTE_IN_SECONDS);
     }
-    if (mac_site_protection_blocked($ip)) mac_site_protection_reject(3600, 'Access temporarily restricted. Please try again later.');
+    if (mac_site_protection_blocked($ip)) {
+        mac_site_protection_record_block_hit($ip);
+        mac_site_protection_reject(3600, 'Access temporarily restricted. Please try again later.');
+    }
 
     $s = mac_site_protection_settings();
     $path = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
@@ -640,9 +654,11 @@ function mac_site_protection_page_v2() {
     ?>
     <div class="wrap mac-protection-content">
         <div class="mac-section-title"><h1>Защита сайта</h1><p>Сайт работает как исполнитель: история и ручные решения находятся в центральном сайте; очередь проверяется примерно раз в 5 минут.</p></div>
+        <?php if (false): // Diagnostics remain stored for troubleshooting, but are not part of the executor UI. ?>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p><?php if ($syncStatus): ?><p><strong>Последняя синхронизация:</strong> <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><br><strong>Результат:</strong> <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'Неизвестно'); ?><?php if (!empty($syncStatus['http_code'])): ?> (HTTP <?php echo (int) $syncStatus['http_code']; ?>)<?php endif; ?><?php if (!empty($syncStatus['received_commands'])): ?><br><strong>Команды от центра:</strong> <?php echo esc_html(implode(', ', array_map('intval', (array) $syncStatus['received_commands']))); ?><?php endif; ?><?php if (!empty($syncStatus['command_results'])): ?><br><strong>Применение:</strong> <?php foreach ((array) $syncStatus['command_results'] as $result): ?><?php echo esc_html('#' . (int) ($result['id'] ?? 0) . ': ' . (!empty($result['ok']) ? 'успешно' : 'ошибка') . (!empty($result['message']) ? ' — ' . (string) $result['message'] : '') . ' '); ?><?php endforeach; ?><?php endif; ?><?php if (!empty($syncStatus['ack_state']) && $syncStatus['ack_state'] !== 'not_required'): ?><br><strong>Подтверждение центру:</strong> <?php echo esc_html($syncStatus['ack_state'] === 'confirmed' ? 'отправлено' : (string) $syncStatus['ack_state']); ?><?php endif; ?><?php if (!empty($syncStatus['error'])): ?><br><strong>Ошибка:</strong> <?php echo esc_html(wp_trim_words((string) $syncStatus['error'], 30, '…')); ?><?php endif; ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form></section>
+        <?php endif; ?>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>WhiteList IP</h2></div><p><?php echo $settings['ip_whitelist'] !== '' ? nl2br(esc_html($settings['ip_whitelist'])) : 'Пусто'; ?></p></section>
-        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="4">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
+        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th><th>Отклонено</th><th>Последняя попытка</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo number_format_i18n((int) ($block['blocked_hits'] ?? 0)); ?></td><td><?php echo esc_html($block['last_blocked_at'] ?: '—'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
     </div>
     <?php
     return;

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Мастер настроек каталога авто
  * Description: Единый мастер для VIN-импорта, логов поиска, синхронизации, Google Indexing и криптоплатежей каталога авто.
- * Version: 1.0.37
+ * Version: 1.0.38
  * Author: AskarTech
  */
 
@@ -252,7 +252,9 @@ function mac_create_site_protection_tables()
     dbDelta("CREATE TABLE IF NOT EXISTS {$wpdb->prefix}site_protection_blocks (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, ip_address VARCHAR(45) NOT NULL,
         reason VARCHAR(100) NOT NULL, created_at DATETIME NOT NULL, expires_at DATETIME NULL,
-        is_active TINYINT(1) NOT NULL DEFAULT 1, PRIMARY KEY (id),
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        blocked_hits BIGINT UNSIGNED NOT NULL DEFAULT 0, last_blocked_at DATETIME NULL,
+        PRIMARY KEY (id),
         KEY active_ip (ip_address, is_active, expires_at)
     ) $charset;");
     dbDelta("CREATE TABLE IF NOT EXISTS {$wpdb->prefix}site_protection_incidents (
