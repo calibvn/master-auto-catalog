@@ -5,7 +5,7 @@ const CAS_ASYNC_DB_VERSION = '1.0';
 const CAS_ASYNC_HOOK = 'cas_process_async_import';
 const CAS_WORKER_HOOK = 'cas_async_import_worker';
 const CAS_CALLBACK_HOOK = 'cas_send_async_import_callback';
-const CAS_ASYNC_MAX_CONCURRENT_WORKERS = 4;
+const CAS_ASYNC_MAX_CONCURRENT_WORKERS = 10;
 
 function cas_async_table(): string { global $wpdb; return $wpdb->prefix . 'cas_import_jobs'; }
 
@@ -71,7 +71,7 @@ function cas_async_schedule(string $hook, string $jobId, int $delay = 0): void {
  * cas_async_kick(), up to the configured concurrency limit.
  */
 function cas_async_worker_limit(): int {
-    return max(1, min(4, (int) apply_filters('cas_async_worker_limit', CAS_ASYNC_MAX_CONCURRENT_WORKERS)));
+    return max(1, min(10, (int) apply_filters('cas_async_worker_limit', CAS_ASYNC_MAX_CONCURRENT_WORKERS)));
 }
 
 function cas_async_schedule_worker(int $delay = 1): void {
