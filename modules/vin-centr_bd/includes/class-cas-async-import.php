@@ -71,7 +71,21 @@ function cas_async_schedule(string $hook, string $jobId, int $delay = 0): void {
  */
 function cas_async_schedule_worker(int $delay = 1): void {
     $delay = max(1, $delay);
+
+    // Only one worker is allowed per site. Previously every accepted VIN could
+    // schedule an Action Scheduler task. A duplicate task that ran while the
+    // real worker was busy exited with `worker_busy` and could consume the
+    // final scheduled run, leaving the rest of the queue indefinitely queued.
+    global $wpdb;
+    $active = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . cas_async_table() . " WHERE status IN ('claimed','running')");
+    if ($active > 0) {
+        return;
+    }
+
     if (function_exists('as_schedule_single_action')) {
+        if (function_exists('as_next_scheduled_action') && as_next_scheduled_action(CAS_WORKER_HOOK, [], 'master-auto-catalog') !== false) {
+            return;
+        }
         as_schedule_single_action(time() + $delay, CAS_WORKER_HOOK, [], 'master-auto-catalog', true);
         return;
     }
@@ -85,6 +99,30 @@ function cas_async_run_worker(): void {
     cas_async_kick();
 }
 add_action(CAS_WORKER_HOOK, 'cas_async_run_worker');
+
+/**
+ * Recover a queue left behind by an interrupted old worker. The check is
+ * throttled, so it does not add a query to every frontend request.
+ */
+function cas_async_resume_pending_queue(): void {
+    if (get_transient('cas_async_queue_resume_check')) {
+        return;
+    }
+    set_transient('cas_async_queue_resume_check', 1, 30);
+
+    global $wpdb;
+    $staleBefore = date('Y-m-d H:i:s', current_time('timestamp') - 30 * MINUTE_IN_SECONDS);
+    $wpdb->query($wpdb->prepare(
+        "UPDATE " . cas_async_table() . " SET status='queued', stage='queued', message='Stale worker returned to queue', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s",
+        current_time('mysql'),
+        $staleBefore
+    ));
+    $hasQueued = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . cas_async_table() . " WHERE status IN ('queued','retry') LIMIT 1");
+    if ($hasQueued > 0) {
+        cas_async_schedule_worker();
+    }
+}
+add_action('init', 'cas_async_resume_pending_queue', 20);
 
 function cas_async_register_routes(): void {
     $permission = static function (WP_REST_Request $request): bool {
