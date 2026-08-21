@@ -128,14 +128,32 @@ function mac_site_protection_central_apply_command(array $command) {
     }
 
     $expiresAt = trim((string) ($command['expires_at'] ?? ''));
-    $wpdb->update($wpdb->prefix . 'site_protection_blocks', ['is_active' => 0], ['ip_address' => $subject], ['%d'], ['%s']);
-    $wpdb->insert($wpdb->prefix . 'site_protection_blocks', [
-        'ip_address' => $subject,
-        'reason' => substr(trim((string) ($command['reason'] ?? 'Решение центра')), 0, 100),
-        'created_at' => current_time('mysql'),
-        'expires_at' => $expiresAt !== '' ? $expiresAt : null,
-        'is_active' => 1, 'blocked_hits' => 0, 'last_blocked_at' => null,
-    ], ['%s', '%s', '%s', '%s', '%d', '%d', '%s']);
+    $table = $wpdb->prefix . 'site_protection_blocks';
+    $reason = substr(trim((string) ($command['reason'] ?? 'Решение центра')), 0, 100);
+    $existing = $wpdb->get_var($wpdb->prepare(
+        "SELECT id FROM {$table} WHERE ip_address=%s AND is_active=1 AND (expires_at IS NULL OR expires_at>%s) ORDER BY id DESC LIMIT 1",
+        $subject,
+        current_time('mysql')
+    ));
+    if ($existing) {
+        // Reapplying a block is a renewal, never a deactivate-then-insert
+        // operation. This preserves both the active protection and its hits.
+        $updated = $wpdb->update($table, [
+            'reason' => $reason,
+            'expires_at' => $expiresAt !== '' ? $expiresAt : null,
+            'is_active' => 1,
+        ], ['id' => (int) $existing], ['%s', '%s', '%d'], ['%d']);
+        if ($updated === false) return [false, 'Не удалось обновить активную блокировку: ' . $wpdb->last_error];
+    } else {
+        $inserted = $wpdb->insert($table, [
+            'ip_address' => $subject,
+            'reason' => $reason,
+            'created_at' => current_time('mysql'),
+            'expires_at' => $expiresAt !== '' ? $expiresAt : null,
+            'is_active' => 1, 'blocked_hits' => 0, 'last_blocked_at' => null,
+        ], ['%s', '%s', '%s', '%s', '%d', '%d', '%s']);
+        if ($inserted === false) return [false, 'Не удалось создать блокировку: ' . $wpdb->last_error];
+    }
     delete_transient(mac_site_protection_state_key('mac_sp_blocked', $subject));
     return [true, $expiresAt === '' ? 'Заблокирован навсегда' : 'Заблокирован до ' . $expiresAt];
 }
