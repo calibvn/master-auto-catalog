@@ -5,6 +5,7 @@ const CAS_ASYNC_DB_VERSION = '1.0';
 const CAS_ASYNC_HOOK = 'cas_process_async_import';
 const CAS_WORKER_HOOK = 'cas_async_import_worker';
 const CAS_CALLBACK_HOOK = 'cas_send_async_import_callback';
+const CAS_ASYNC_MAX_CONCURRENT_WORKERS = 4;
 
 function cas_async_table(): string { global $wpdb; return $wpdb->prefix . 'cas_import_jobs'; }
 
@@ -66,19 +67,22 @@ function cas_async_schedule(string $hook, string $jobId, int $delay = 0): void {
 
 /**
  * Queue a single site-wide worker. Import jobs must never be scheduled one
- * worker per VIN: all jobs for this WordPress site are claimed by
- * cas_async_kick() one at a time.
+ * workers per VIN: jobs for this WordPress site are claimed atomically by
+ * cas_async_kick(), up to the configured concurrency limit.
  */
+function cas_async_worker_limit(): int {
+    return max(1, min(4, (int) apply_filters('cas_async_worker_limit', CAS_ASYNC_MAX_CONCURRENT_WORKERS)));
+}
+
 function cas_async_schedule_worker(int $delay = 1): void {
     $delay = max(1, $delay);
 
-    // Only one worker is allowed per site. Previously every accepted VIN could
-    // schedule an Action Scheduler task. A duplicate task that ran while the
-    // real worker was busy exited with `worker_busy` and could consume the
-    // final scheduled run, leaving the rest of the queue indefinitely queued.
+    // A single scheduled starter fills free slots. Import work itself is
+    // claimed atomically below, so no more than the configured worker limit
+    // can run even when several starter requests overlap.
     global $wpdb;
     $active = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . cas_async_table() . " WHERE status IN ('claimed','running')");
-    if ($active > 0) {
+    if ($active >= cas_async_worker_limit()) {
         return;
     }
 
@@ -99,6 +103,23 @@ function cas_async_run_worker(): void {
     cas_async_kick();
 }
 add_action(CAS_WORKER_HOOK, 'cas_async_run_worker');
+
+function cas_async_spawn_workers(int $maximum = 3): void {
+    $key = trim((string) get_option('cas_sync_key', ''));
+    if ($key === '' || $maximum < 1) return;
+    global $wpdb;
+    $active = (int) $wpdb->get_var("SELECT COUNT(*) FROM " . cas_async_table() . " WHERE status IN ('claimed','running')");
+    $count = min($maximum, max(0, cas_async_worker_limit() - $active));
+    if ($count < 1) return;
+    $url = rest_url('auto-sync/v1/import-kick');
+    for ($i = 0; $i < $count; $i++) {
+        wp_remote_post($url, [
+            'timeout' => 1,
+            'blocking' => false,
+            'headers' => ['X-API-Key' => $key, 'X-CAS-Worker-Spawn' => '1'],
+        ]);
+    }
+}
 
 /**
  * Recover a queue left behind by an interrupted old worker. The check is
@@ -181,14 +202,29 @@ function cas_async_kick(): WP_REST_Response {
     $staleBefore = date('Y-m-d H:i:s', current_time('timestamp') - 30 * MINUTE_IN_SECONDS);
     $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='queued', stage='queued', message='Stale worker returned to queue', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s", current_time('mysql'), $staleBefore));
 
-    $active = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE status IN ('claimed','running')");
-    if ($active > 0) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'worker_busy'], 202);
+    $lockName = 'cas_async_kick_' . md5(cas_async_table());
+    $locked = (int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lockName));
+    if ($locked !== 1) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'claim_lock_busy'], 202);
 
-    $jobId = (string)$wpdb->get_var("SELECT job_id FROM {$table} WHERE status IN ('queued','retry') ORDER BY id ASC LIMIT 1");
-    if ($jobId === '') return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'queue_empty'], 200);
+    $jobId = '';
+    try {
+        $active = (int)$wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE status IN ('claimed','running')");
+        if ($active >= cas_async_worker_limit()) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'worker_limit'], 202);
 
-    $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='claimed', stage='queued', message='Worker claimed job', updated_at=%s WHERE job_id=%s AND status IN ('queued','retry')", current_time('mysql'), $jobId));
-    if ($claimed !== 1) return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'claim_race'], 202);
+        for ($attempt = 0; $attempt < 4; $attempt++) {
+            $candidate = (string)$wpdb->get_var("SELECT job_id FROM {$table} WHERE status IN ('queued','retry') ORDER BY id ASC LIMIT 1");
+            if ($candidate === '') break;
+            $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='claimed', stage='queued', message='Worker claimed job', updated_at=%s WHERE job_id=%s AND status IN ('queued','retry')", current_time('mysql'), $candidate));
+            if ($claimed === 1) { $jobId = $candidate; break; }
+        }
+    } finally {
+        $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lockName));
+    }
+    if ($jobId === '') return new WP_REST_Response(['success' => true, 'started' => false, 'reason' => 'queue_empty_or_claim_race'], 200);
+
+    if (empty($_SERVER['HTTP_X_CAS_WORKER_SPAWN'])) {
+        cas_async_spawn_workers(cas_async_worker_limit() - 1);
+    }
 
     $GLOBALS['cas_async_kick_job_id'] = $jobId;
     cas_process_async_import($jobId);
