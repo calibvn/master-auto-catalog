@@ -500,17 +500,36 @@ function mac_site_protection_is_site_search_request($wp = null) {
 }
 
 function mac_site_protection_honeypot_path() {
-    return '/mac-crawler-trap/';
+    $option = 'mac_site_protection_honeypot_path_v2';
+    $path = (string) get_option($option, '');
+    if (preg_match('#^/[a-z0-9][a-z0-9/_-]{12,120}\.(?:xml|json|txt|html|js)$#', $path)) {
+        return $path;
+    }
+
+    // Generated once per site and kept in wp_options. Do not rotate this path:
+    // robots.txt and the invisible link must always point to the same target.
+    $folders = ['assets', 'content', 'data', 'files', 'media', 'resources', 'static'];
+    $names = ['archive', 'catalog', 'feed', 'index', 'manifest', 'preview', 'resource'];
+    $extensions = ['xml', 'json', 'txt', 'html', 'js'];
+    $token = strtolower(wp_generate_password(14, false, false));
+    $path = '/' . $folders[array_rand($folders)] . '/' . $token . '/' . $names[array_rand($names)] . '-' . substr($token, 0, 7) . '.' . $extensions[array_rand($extensions)];
+    update_option($option, $path, false);
+    return $path;
 }
 
 add_filter('robots_txt', function ($output, $public) {
-    return rtrim((string) $output) . "\nUser-agent: *\nDisallow: " . mac_site_protection_honeypot_path() . "\n";
+    // Remove the legacy shared path on the first request after the update.
+    $output = preg_replace('#^\s*Disallow:\s*/mac-crawler-trap/?\s*$#mi', '', (string) $output);
+    return rtrim($output) . "\nUser-agent: *\nDisallow: " . mac_site_protection_honeypot_path() . "\n";
 }, 10, 2);
 
 add_action('wp_footer', function () {
     if (is_admin()) return;
+    $path = mac_site_protection_honeypot_path();
+    $marker = 'v-' . substr(hash('sha256', $path), 0, 12);
     echo '<script>document.cookie="mac_browser=1; path=/; max-age=2592000; SameSite=Lax";</script>';
-    echo '<a href="' . esc_url(home_url(mac_site_protection_honeypot_path())) . '" rel="nofollow" aria-hidden="true" tabindex="-1" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden">.</a>';
+    echo '<style>.' . esc_attr($marker) . '{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}</style>';
+    echo '<a class="' . esc_attr($marker) . '" href="' . esc_url(home_url($path)) . '" rel="nofollow" aria-hidden="true" tabindex="-1">.</a>';
 }, 999);
 
 function mac_site_protection_browser_signal_score($ua) {
@@ -608,7 +627,7 @@ function mac_site_protection_enforce_v2($wp = null) {
         mac_site_protection_log_event($subject, 'honeypot', 1, 0, $s['protection_mode'] === 'enforce' ? 'block' : 'monitor', $ua);
         if ($s['protection_mode'] === 'enforce') {
             $minutes = 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS;
-            mac_site_protection_block($subject, 'Honeypot crawler trap', $minutes);
+            mac_site_protection_block($subject, 'Service URL access', $minutes);
             nocache_headers(); status_header(403); header('Content-Type: text/plain; charset=utf-8'); echo 'Access denied.'; exit;
         }
         return;
