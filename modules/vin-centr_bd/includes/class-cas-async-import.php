@@ -134,7 +134,7 @@ function cas_async_resume_pending_queue(): void {
     global $wpdb;
     $staleBefore = date('Y-m-d H:i:s', current_time('timestamp') - 30 * MINUTE_IN_SECONDS);
     $wpdb->query($wpdb->prepare(
-        "UPDATE " . cas_async_table() . " SET status='queued', stage='queued', message='Stale worker returned to queue', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s",
+        "UPDATE " . cas_async_table() . " SET status='queued', stage='queued', message='Зависшее задание возвращено в очередь', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s",
         current_time('mysql'),
         $staleBefore
     ));
@@ -175,22 +175,22 @@ function cas_async_accept(WP_REST_Request $request): WP_REST_Response {
     $vin = strtoupper(preg_replace('/[^A-HJ-NPR-Z0-9]/', '', trim((string)($data['vin'] ?? ''))));
     $jobId = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($data['job_id'] ?? ''));
     $batchId = preg_replace('/[^a-zA-Z0-9_-]/', '', (string)($data['batch_id'] ?? ''));
-    if (strlen($vin) !== 17 || $jobId === '') return new WP_REST_Response(['success' => false, 'message' => 'Invalid VIN or job_id'], 400);
+    if (strlen($vin) !== 17 || $jobId === '') return new WP_REST_Response(['success' => false, 'message' => 'Некорректный VIN или идентификатор задания'], 400);
     $existing = cas_async_get($jobId);
     if ($existing) {
         if (in_array($existing['status'], ['queued', 'retry'], true)) cas_async_schedule_worker();
         return new WP_REST_Response(['success' => true, 'accepted' => true, 'duplicate_job' => true, 'job' => cas_async_public_job($existing)], 202);
     }
     $now = current_time('mysql');
-    $ok = $wpdb->insert(cas_async_table(), ['job_id' => substr($jobId,0,64), 'vin' => $vin, 'batch_id' => substr($batchId,0,64), 'status' => 'queued', 'stage' => 'queued', 'message' => 'Import queued', 'created_at' => $now, 'updated_at' => $now]);
-    if (!$ok) return new WP_REST_Response(['success' => false, 'message' => 'Unable to save import job'], 500);
+    $ok = $wpdb->insert(cas_async_table(), ['job_id' => substr($jobId,0,64), 'vin' => $vin, 'batch_id' => substr($batchId,0,64), 'status' => 'queued', 'stage' => 'queued', 'message' => 'Задание поставлено в очередь', 'created_at' => $now, 'updated_at' => $now]);
+    if (!$ok) return new WP_REST_Response(['success' => false, 'message' => 'Не удалось сохранить задание импорта'], 500);
     cas_async_schedule_worker();
     return new WP_REST_Response(['success' => true, 'accepted' => true, 'job_id' => $jobId, 'vin' => $vin, 'status' => 'queued', 'stage' => 'queued'], 202);
 }
 
 function cas_async_status(WP_REST_Request $request): WP_REST_Response {
     $row = cas_async_get((string)$request['job_id']);
-    return $row ? new WP_REST_Response(['success' => true, 'job' => cas_async_public_job($row)], 200) : new WP_REST_Response(['success' => false, 'message' => 'Job not found'], 404);
+    return $row ? new WP_REST_Response(['success' => true, 'job' => cas_async_public_job($row)], 200) : new WP_REST_Response(['success' => false, 'message' => 'Задание не найдено'], 404);
 }
 
 function cas_async_kick(): WP_REST_Response {
@@ -200,7 +200,7 @@ function cas_async_kick(): WP_REST_Response {
 
     $table = cas_async_table();
     $staleBefore = date('Y-m-d H:i:s', current_time('timestamp') - 30 * MINUTE_IN_SECONDS);
-    $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='queued', stage='queued', message='Stale worker returned to queue', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s", current_time('mysql'), $staleBefore));
+    $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='queued', stage='queued', message='Зависшее задание возвращено в очередь', updated_at=%s WHERE status IN ('claimed','running') AND updated_at < %s", current_time('mysql'), $staleBefore));
 
     $lockName = 'cas_async_kick_' . md5(cas_async_table());
     $locked = (int) $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 2)', $lockName));
@@ -214,7 +214,7 @@ function cas_async_kick(): WP_REST_Response {
         for ($attempt = 0; $attempt < 4; $attempt++) {
             $candidate = (string)$wpdb->get_var("SELECT job_id FROM {$table} WHERE status IN ('queued','retry') ORDER BY id ASC LIMIT 1");
             if ($candidate === '') break;
-            $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='claimed', stage='queued', message='Worker claimed job', updated_at=%s WHERE job_id=%s AND status IN ('queued','retry')", current_time('mysql'), $candidate));
+            $claimed = $wpdb->query($wpdb->prepare("UPDATE {$table} SET status='claimed', stage='queued', message='Задание взято в обработку', updated_at=%s WHERE job_id=%s AND status IN ('queued','retry')", current_time('mysql'), $candidate));
             if ($claimed === 1) { $jobId = $candidate; break; }
         }
     } finally {
@@ -262,7 +262,7 @@ function cas_process_async_import(string $jobId): void {
     // per-job scheduled actions are deliberately ignored to prevent parallel
     // imports on the same site.
     if (!$row || !$kickClaim) return;
-    cas_async_update($jobId, ['status' => 'running', 'stage' => 'searching', 'started_at' => current_time('mysql'), 'message' => 'Import started']);
+    cas_async_update($jobId, ['status' => 'running', 'stage' => 'searching', 'started_at' => current_time('mysql'), 'message' => 'Импорт начат']);
     $GLOBALS['cas_async_current_job_id'] = $jobId;
     try {
         $request = new WP_REST_Request('POST', '/auto-sync/v1/import');
@@ -271,9 +271,11 @@ function cas_process_async_import(string $jobId): void {
         $result = cas_api_import_vehicle($request);
         if (is_wp_error($result)) $result = ['success' => false, 'message' => $result->get_error_message()];
         elseif ($result instanceof WP_REST_Response) $result = $result->get_data();
-        $result = is_array($result) ? $result : ['success' => false, 'message' => 'Invalid import result'];
+        $result = is_array($result) ? $result : ['success' => false, 'message' => 'Некорректный результат импорта'];
         $already = !empty($result['already_exists']);
-        $status = $already ? 'already_exists' : (!empty($result['success']) ? 'completed' : (stripos((string)($result['message'] ?? ''), 'not found') !== false ? 'not_found' : 'failed'));
+        $message = trim((string)($result['message'] ?? ''));
+        $notFound = preg_match('/(?:no providers found vehicle|vehicle not found|not found)/i', $message) === 1;
+        $status = $already ? 'already_exists' : (!empty($result['success']) ? 'completed' : ($notFound ? 'not_found' : 'failed'));
         $pid = !empty($result['product_id']) ? (int)$result['product_id'] : null;
         $progress = cas_async_get($jobId) ?: [];
         $actualImages = $pid ? 1 + cas_get_product_gallery_count($pid) : null;
@@ -282,7 +284,7 @@ function cas_process_async_import(string $jobId): void {
         if ($status === 'completed' && $imagesTotal !== null && $imagesLoaded !== null && $imagesLoaded < $imagesTotal) {
             $status = 'completed_with_warnings';
         }
-        cas_async_update($jobId, ['status' => $status, 'stage' => 'completed', 'product_id' => $pid, 'product_url' => (string)($result['url'] ?? ''), 'images_total' => $imagesTotal, 'images_loaded' => $imagesLoaded, 'message' => (string)($result['message'] ?? ''), 'result_json' => wp_json_encode($result), 'completed_at' => current_time('mysql')]);
+        cas_async_update($jobId, ['status' => $status, 'stage' => 'completed', 'product_id' => $pid, 'product_url' => (string)($result['url'] ?? ''), 'images_total' => $imagesTotal, 'images_loaded' => $imagesLoaded, 'message' => $message, 'result_json' => wp_json_encode($result), 'completed_at' => current_time('mysql')]);
     } catch (Throwable $e) {
         cas_async_update($jobId, ['status' => 'failed', 'stage' => 'completed', 'message' => $e->getMessage(), 'completed_at' => current_time('mysql')]);
     }
