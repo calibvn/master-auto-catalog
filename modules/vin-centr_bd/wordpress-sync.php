@@ -571,7 +571,7 @@ add_action('wp_ajax_cas_sync_step', function () {
             'model' => $attrs['model'] ?? '',
             'year' => $attrs['car_year'] ?? '',
             'price' => $price !== null && $price !== '' ? (float)$price : null,
-            'status' => $product->post_status == 'publish' ? 'published' : ($product->post_status == 'private' ? 'hidden' : 'draft'),
+            'status' => cas_async_product_site_status((int) $product->ID),
             'product_id' => (int)$product->ID,
             'product_url' => get_permalink($product->ID),
             'title' => (string)$product->post_title,
@@ -645,12 +645,18 @@ add_action('wp_ajax_cas_sync_step', function () {
 /**
  * REST endpoints (как было)
  */
+function cas_sync_key_authorized(WP_REST_Request $request): bool {
+    $configured = trim((string) get_option('cas_sync_key', ''));
+    $provided = trim((string) $request->get_header('X-API-Key'));
+    return $configured !== '' && $provided !== '' && hash_equals($configured, $provided);
+}
+
 add_action('rest_api_init', function () {
     register_rest_route('auto-sync/v1', '/vehicles', [
         'methods' => 'GET',
         'callback' => 'cas_api_get_all_vehicles',
         'permission_callback' => function ($request) {
-            return $request->get_header('X-API-Key') === get_option('cas_sync_key');
+            return cas_sync_key_authorized($request);
         }
     ]);
 
@@ -658,7 +664,7 @@ add_action('rest_api_init', function () {
         'methods' => 'POST',
         'callback' => 'cas_api_import_vehicle',
         'permission_callback' => function ($request) {
-            return $request->get_header('X-API-Key') === get_option('cas_sync_key');
+            return cas_sync_key_authorized($request);
         }
     ]);
 
@@ -666,7 +672,7 @@ add_action('rest_api_init', function () {
         'methods' => 'POST',
         'callback' => 'cas_api_hide_vehicle',
         'permission_callback' => function ($request) {
-            return $request->get_header('X-API-Key') === get_option('cas_sync_key');
+            return cas_sync_key_authorized($request);
         }
     ]);
 });

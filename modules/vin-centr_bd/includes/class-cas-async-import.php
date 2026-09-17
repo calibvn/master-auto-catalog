@@ -157,11 +157,19 @@ function cas_async_register_routes(): void {
 }
 add_action('rest_api_init', 'cas_async_register_routes');
 
+function cas_async_product_site_status(int $productId): ?string {
+    if ($productId <= 0) return null;
+    if (get_post_meta($productId, '_mac_vin_hidden_placeholder', true)) return 'placeholder';
+    if (get_post_meta($productId, '_mac_vin_hide_mode', true) === 'redirect') return 'redirect';
+    return get_post_status($productId) === 'publish' ? 'published' : 'draft';
+}
+
 function cas_async_public_job(array $row): array {
     return [
         'job_id' => $row['job_id'], 'vin' => $row['vin'], 'batch_id' => $row['batch_id'],
         'status' => $row['status'], 'stage' => $row['stage'],
         'product_id' => $row['product_id'] ? (int)$row['product_id'] : null,
+        'site_status' => cas_async_product_site_status((int) ($row['product_id'] ?? 0)),
         'product_url' => $row['product_url'] ?: null,
         'images_total' => $row['images_total'] !== null ? (int)$row['images_total'] : null,
         'images_loaded' => $row['images_loaded'] !== null ? (int)$row['images_loaded'] : null,
@@ -278,7 +286,7 @@ function cas_process_async_import(string $jobId): void {
         $result = is_array($result) ? $result : ['success' => false, 'message' => 'Некорректный результат импорта'];
         $already = !empty($result['already_exists']);
         $message = trim((string)($result['message'] ?? ''));
-        $notFound = preg_match('/(?:no providers found vehicle|vehicle not found|not found)/i', $message) === 1;
+        $notFound = preg_match('/^no providers found vehicle(?:[.!:]|$)/i', $message) === 1;
         $status = $already ? 'already_exists' : (!empty($result['success']) ? 'completed' : ($notFound ? 'not_found' : 'failed'));
         $pid = !empty($result['product_id']) ? (int)$result['product_id'] : null;
         $progress = cas_async_get($jobId) ?: [];
