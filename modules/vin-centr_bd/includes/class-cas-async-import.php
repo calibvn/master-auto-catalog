@@ -5,7 +5,7 @@ const CAS_ASYNC_DB_VERSION = '1.0';
 const CAS_ASYNC_HOOK = 'cas_process_async_import';
 const CAS_WORKER_HOOK = 'cas_async_import_worker';
 const CAS_CALLBACK_HOOK = 'cas_send_async_import_callback';
-const CAS_ASYNC_MAX_CONCURRENT_WORKERS = 10;
+const CAS_ASYNC_MAX_CONCURRENT_WORKERS = 3;
 
 function cas_async_table(): string { global $wpdb; return $wpdb->prefix . 'cas_import_jobs'; }
 
@@ -248,6 +248,10 @@ function cas_async_trace_job(array $event): void {
 add_action('mac_vin_import_trace', 'cas_async_trace_job', 5);
 
 function cas_async_send_progress(string $jobId): void {
+    // The final callback is sent separately; cap intermediate updates per job.
+    $throttleKey = 'cas_progress_' . md5($jobId);
+    if (get_transient($throttleKey)) return;
+    set_transient($throttleKey, 1, 10);
     $row = cas_async_get($jobId); if (!$row) return;
     $url = rtrim((string)get_option('cas_central_url', ''), '/') . '/api/import-callback.php';
     $key = trim((string)get_option('cas_api_key', ''));
