@@ -12,6 +12,7 @@ define('CAS_SYNC_BATCH_SIZE', 50);   // размер пачки
 define('CAS_SYNC_TIMEOUT', 120);     // timeout запроса на центральный
 define('CAS_EXCHANGE_LOG_DB_VERSION', '2.0');
 require_once __DIR__ . '/includes/class-cas-async-import.php';
+require_once __DIR__ . '/includes/class-cas-vehicle-events.php';
 
 function cas_exchange_log_table()
 {
@@ -155,6 +156,15 @@ function cas_exchange_logs_pager($total, $page)
     echo '</nav>';
 }
 
+function cas_exchange_status_label(string $status): string {
+    return [
+        'started' => 'Начато', 'running' => 'В работе', 'queued' => 'В очереди',
+        'success' => 'Успешно', 'completed' => 'Готово', 'already_exists' => 'Уже есть',
+        'not_found' => 'Не найдено', 'error' => 'Ошибка', 'failed' => 'Ошибка',
+        'info' => 'Информация', 'warning' => 'Предупреждение',
+    ][$status] ?? $status;
+}
+
 function cas_render_exchange_logs()
 {
     global $wpdb;
@@ -199,10 +209,10 @@ function cas_render_exchange_logs()
         <?php if (!$ordered_imports): ?><tr><td colspan="9">Импортов пока нет.</td></tr><?php endif; ?>
         <?php foreach ($ordered_imports as $import): $row = $import['summary']; $events = $import['events']; ?>
         <tr data-request-id="<?= esc_attr($row['request_id']) ?>">
-            <td><?= esc_html($row['updated_at'] ?: $row['created_at']) ?></td><td><code><?= esc_html($row['vin']) ?></code></td><td><?= esc_html($row['status']) ?></td><td><?= esc_html($row['provider'] ?: '—') ?></td><td><?= $row['product_id'] ? (int)$row['product_id'] : '—' ?></td><td><?= $row['images_total'] !== null ? (int)$row['images_loaded'] . '/' . (int)$row['images_total'] : '—' ?></td><td><?= $row['duration_ms'] !== null ? esc_html(number_format_i18n(((int)$row['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($row['message'] ?: '—') ?></td><td><button type="button" class="button-link mac-log-details-toggle" aria-expanded="false">Подробнее (<?= count($events) ?>)</button></td>
+            <td><?= esc_html($row['updated_at'] ?: $row['created_at']) ?></td><td><code><?= esc_html($row['vin']) ?></code></td><td><?= esc_html(cas_exchange_status_label((string) $row['status'])) ?></td><td><?= esc_html($row['provider'] ?: '—') ?></td><td><?= $row['product_id'] ? (int)$row['product_id'] : '—' ?></td><td><?= $row['images_total'] !== null ? (int)$row['images_loaded'] . '/' . (int)$row['images_total'] : '—' ?></td><td><?= $row['duration_ms'] !== null ? esc_html(number_format_i18n(((int)$row['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($row['message'] ?: '—') ?></td><td><button type="button" class="button-link mac-log-details-toggle" aria-expanded="false">Подробнее (<?= count($events) ?>)</button></td>
         </tr>
         <tr class="mac-log-details" hidden><td colspan="9"><div style="overflow-x:auto"><table class="widefat striped"><thead><tr><th>Время</th><th>Этап</th><th>Статус</th><th>Провайдер</th><th>Товар</th><th>Фото</th><th>Время</th><th>Сообщение</th></tr></thead><tbody>
-        <?php foreach ($events as $detail): ?><tr><td><?= esc_html($detail['time'] ?? '—') ?></td><td><?= esc_html($detail['stage'] ?? '—') ?></td><td><?= esc_html($detail['status'] ?? '—') ?></td><td><?= esc_html(($detail['provider'] ?? '') ?: '—') ?></td><td><?= !empty($detail['product_id']) ? (int)$detail['product_id'] : '—' ?></td><td><?= isset($detail['images_total']) ? (int)($detail['images_loaded'] ?? 0) . '/' . (int)$detail['images_total'] : '—' ?></td><td><?= isset($detail['duration_ms']) ? esc_html(number_format_i18n(((int)$detail['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($detail['message'] ?? '—') ?></td></tr><?php endforeach; ?>
+        <?php foreach ($events as $detail): ?><tr><td><?= esc_html($detail['time'] ?? '—') ?></td><td><?= esc_html($detail['stage'] ?? '—') ?></td><td><?= esc_html(cas_exchange_status_label((string) ($detail['status'] ?? '—'))) ?></td><td><?= esc_html(($detail['provider'] ?? '') ?: '—') ?></td><td><?= !empty($detail['product_id']) ? (int)$detail['product_id'] : '—' ?></td><td><?= isset($detail['images_total']) ? (int)($detail['images_loaded'] ?? 0) . '/' . (int)$detail['images_total'] : '—' ?></td><td><?= isset($detail['duration_ms']) ? esc_html(number_format_i18n(((int)$detail['duration_ms']) / 1000, 2) . ' с') : '—' ?></td><td><?= esc_html($detail['message'] ?? '—') ?></td></tr><?php endforeach; ?>
         </tbody></table></div></td></tr>
         <?php endforeach; ?></tbody>
     </table></div>
@@ -219,7 +229,7 @@ function cas_render_exchange_logs()
     });
     document.querySelectorAll('.mac-sync-exchange-logs .widefat td').forEach(function (cell) {
         var value = cell.textContent.trim();
-        if (!value || value === '—') return;
+        if (!value || value === '—' || cell.querySelector('button, a, input, select')) return;
         cell.classList.add('mac-copyable');
         cell.title = value;
         cell.addEventListener('click', function () {
@@ -293,7 +303,7 @@ function cas_options_page()
                     <th><label>Sync Key:</label></th>
                     <td>
                         <input type="text" name="sync_key" value="<?= $sync_key ?>" class="regular-text" required>
-                        <p class="description">Ключ для получения команд от центрального сервиса (REST /vehicles и /import)</p>
+                        <p class="description">Ключ для команд центра (REST /import-async, /import-status и /hide)</p>
                     </td>
                 </tr>
             </table>
