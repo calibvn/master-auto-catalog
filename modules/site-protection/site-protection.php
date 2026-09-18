@@ -187,6 +187,8 @@ function mac_site_protection_central_apply_settings(array $remote) {
     $settings = mac_site_protection_settings();
     $settings['rate_limit_count'] = max(30, (int)($remote['site_rate_limit'] ?? $settings['rate_limit_count']));
     $settings['xml_rate_limit_count'] = max(2, (int)($remote['xml_rate_limit'] ?? $settings['xml_rate_limit_count']));
+    $settings['site_daily_limit'] = max(100, (int)($remote['site_daily_limit'] ?? $settings['site_daily_limit']));
+    $settings['xml_daily_limit'] = max(5, (int)($remote['xml_daily_limit'] ?? $settings['xml_daily_limit']));
     $settings['rate_limit_minutes'] = max(1, (int)($remote['window_minutes'] ?? $settings['rate_limit_minutes']));
     $settings['xml_rate_limit_minutes'] = $settings['rate_limit_minutes'];
     $settings['protection_mode'] = !empty($remote['auto_block_enabled']) ? 'enforce' : 'monitor';
@@ -350,6 +352,7 @@ function mac_site_protection_settings() {
         'protection_mode' => 'monitor',
         'rate_limit_count' => '200', 'rate_limit_minutes' => '10',
         'xml_rate_limit_count' => '5', 'xml_rate_limit_minutes' => '10',
+        'site_daily_limit' => '1000', 'xml_daily_limit' => '20',
         'unverified_bot_limit' => '60', 'seo_bot_limit' => '30',
         'ip_whitelist' => '', 'ua_whitelist' => '', 'telegram_topic_id' => '27659',
     ]);
@@ -484,14 +487,25 @@ function mac_site_protection_register_incident($ip, $rule_key) {
 function mac_site_protection_block($ip, $reason, $minutes) {
     global $wpdb;
     $expires_at = $minutes === null ? null : wp_date('Y-m-d H:i:s', time() + max(1, (int) $minutes) * MINUTE_IN_SECONDS);
-    $already_blocked = $wpdb->get_var($wpdb->prepare(
-        "SELECT id FROM {$wpdb->prefix}site_protection_blocks WHERE ip_address = %s AND is_active = 1 AND (expires_at IS NULL OR expires_at > %s) LIMIT 1",
+    $already_blocked = $wpdb->get_row($wpdb->prepare(
+        "SELECT id, expires_at FROM {$wpdb->prefix}site_protection_blocks WHERE ip_address = %s AND is_active = 1 AND (expires_at IS NULL OR expires_at > %s) ORDER BY expires_at DESC LIMIT 1",
         $ip,
         current_time('mysql')
     ));
-    if ($already_blocked) return;
-    $wpdb->insert($wpdb->prefix . 'site_protection_blocks', ['ip_address' => $ip, 'reason' => $reason, 'created_at' => current_time('mysql'), 'expires_at' => $expires_at, 'is_active' => 1], ['%s','%s','%s','%s','%d']);
+    if ($already_blocked) {
+        if ($already_blocked->expires_at === null || ($expires_at !== null && $already_blocked->expires_at >= $expires_at)) return true;
+        $updated = $wpdb->update($wpdb->prefix . 'site_protection_blocks', ['expires_at' => $expires_at, 'reason' => $reason], ['id' => (int) $already_blocked->id], ['%s', '%s'], ['%d']);
+        if ($updated === false) return false;
+        delete_transient(mac_site_protection_state_key('mac_sp_blocked', $ip));
+        return true;
+    }
+    $inserted = $wpdb->insert($wpdb->prefix . 'site_protection_blocks', ['ip_address' => $ip, 'reason' => $reason, 'created_at' => current_time('mysql'), 'expires_at' => $expires_at, 'is_active' => 1], ['%s','%s','%s','%s','%d']);
+    if ($inserted === false) {
+        error_log('Site protection block insert failed: ' . $wpdb->last_error);
+        return false;
+    }
     delete_transient(mac_site_protection_state_key('mac_sp_blocked', $ip));
+    return true;
 }
 function mac_site_protection_cached_official_request($ua, $ip) {
     $bot = mac_sitemap_logs_bot_key($ua);
@@ -622,6 +636,41 @@ function mac_site_protection_increment_window($ip, $rule_key, $minutes, $max_hit
     return (int) $wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(hits),0) FROM {$table} WHERE subject=%s AND rule_key=%s AND bucket_start >= %s", $ip, $rule_key, $cutoff));
 }
 
+/**
+ * Current and previous 95 quarter-hour buckets cover the past 24 hours
+ * with at most 15 minutes of boundary approximation.
+ */
+function mac_site_protection_increment_daily_window($subject, $rule_key) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'site_protection_rate_buckets';
+    $slot = intdiv(time(), 15 * MINUTE_IN_SECONDS) * 15 * MINUTE_IN_SECONDS;
+    $bucket = gmdate('Y-m-d H:i:00', $slot);
+    $cutoff = gmdate('Y-m-d H:i:00', $slot - 95 * 15 * MINUTE_IN_SECONDS);
+    $inserted = $wpdb->query($wpdb->prepare("INSERT INTO {$table} (subject,rule_key,bucket_start,hits) VALUES (%s,%s,%s,1) ON DUPLICATE KEY UPDATE hits=hits+1", $subject, $rule_key, $bucket));
+    if ($inserted === false) {
+        error_log('Site protection daily counter failed: ' . $wpdb->last_error);
+        return 0;
+    }
+    return (int) $wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(hits),0) FROM {$table} WHERE subject=%s AND rule_key=%s AND bucket_start >= %s", $subject, $rule_key, $cutoff));
+}
+
+function mac_site_protection_handle_daily_threshold($subject, $rule_key, $count, $limit, $ua, $mode) {
+    if ($mode !== 'enforce') {
+        $event_key = mac_site_protection_state_key('mac_sp_daily_monitor', $subject . '|' . $rule_key);
+        if (get_transient($event_key) === false) {
+            set_transient($event_key, '1', HOUR_IN_SECONDS);
+            mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'monitor', $ua);
+        }
+        return;
+    }
+    if (!mac_site_protection_block($subject, 'Daily request limit', DAY_IN_SECONDS / MINUTE_IN_SECONDS)) {
+        mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'error', $ua);
+        mac_site_protection_reject(60);
+    }
+    mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'block', $ua);
+    mac_site_protection_reject(DAY_IN_SECONDS);
+}
+
 function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, $ua) {
     global $wpdb;
     $wpdb->insert($wpdb->prefix . 'site_protection_events', [
@@ -704,6 +753,9 @@ function mac_site_protection_enforce_v2($wp = null) {
         $minutes = 10;
         $limit = 12;
         $subject = mac_site_protection_subject($ip, $class);
+        $daily_limit = max(100, (int) ($s['site_daily_limit'] ?? 1000));
+        $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
+        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
         $count = mac_site_protection_increment_window($subject, 'catalog_api_rate', $minutes, $limit + 1);
         if ($count > $limit) mac_site_protection_handle_threshold($subject, 'catalog_api_rate', $count, $limit, $minutes, $ua, $s['protection_mode']);
         return;
@@ -725,6 +777,9 @@ function mac_site_protection_enforce_v2($wp = null) {
         $limit = max(2, (int) $s['xml_rate_limit_count']);
         $rule_key = 'xml_rate_auto';
         $subject = mac_site_protection_subject($ip, $class);
+        $daily_limit = max(5, (int) ($s['xml_daily_limit'] ?? 20));
+        $daily_count = mac_site_protection_increment_daily_window($subject, 'xml_daily_auto');
+        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'xml_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
         $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
         if ($count > $limit) {
             mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $s['protection_mode']);
@@ -741,6 +796,9 @@ function mac_site_protection_enforce_v2($wp = null) {
     if ($class === 'suspicious_browser') $limit = min($limit, max(10, (int) ($s['unverified_bot_limit'] ?? $limit)));
     $rule_key = 'site_rate_auto';
     $subject = mac_site_protection_subject($ip, $class);
+    $daily_limit = max(100, (int) ($s['site_daily_limit'] ?? 1000));
+    $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
+    if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
     $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
     if ($count <= $limit) return;
     mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $s['protection_mode']);
