@@ -546,6 +546,12 @@ function mac_site_protection_is_meaningful_request($path) {
  * counters. High search activity is useful to the catalogue and must not
  * create an intensive-crawler record or trigger an IP block.
  */
+function mac_site_protection_is_store_products_collection($path) {
+    $route = (string) ($_GET['rest_route'] ?? $path);
+    if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
+    return preg_match('#^/wc/store/v[0-9]+/products/?$#i', $route) === 1;
+}
+
 function mac_site_protection_is_public_catalog_api($path, $uri) {
     $route = (string) ($_GET['rest_route'] ?? $path);
     if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
@@ -685,6 +691,23 @@ function mac_site_protection_enforce_v2($wp = null) {
     $is_xml = mac_sitemap_logs_is_xml_request($path);
     $class = mac_site_protection_traffic_class($ua, $ip);
     if ($class === 'official') return;
+
+    if (mac_site_protection_is_store_products_collection($path)) {
+        $requestedPageSize = isset($_GET['per_page']) ? (int) $_GET['per_page'] : 10;
+        if ($requestedPageSize > 20) {
+            nocache_headers();
+            status_header(400);
+            header('Content-Type: application/json; charset=utf-8');
+            echo wp_json_encode(['code' => 'catalog_page_limit', 'message' => 'Maximum 20 products per page.']);
+            exit;
+        }
+        $minutes = 10;
+        $limit = 12;
+        $subject = mac_site_protection_subject($ip, $class);
+        $count = mac_site_protection_increment_window($subject, 'catalog_api_rate', $minutes, $limit + 1);
+        if ($count > $limit) mac_site_protection_handle_threshold($subject, 'catalog_api_rate', $count, $limit, $minutes, $ua, $s['protection_mode']);
+        return;
+    }
 
     if (untrailingslashit($path) === untrailingslashit(mac_site_protection_honeypot_path())) {
         $subject = mac_site_protection_subject($ip, 'honeypot');
