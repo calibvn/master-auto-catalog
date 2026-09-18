@@ -13,17 +13,34 @@ function mac_site_protection_state_version() {
  * The central agent forwards short-lived local observations to the selected
  * centre and applies only decisions explicitly queued by an administrator.
  */
-const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.1.0';
+const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.2.0';
 const MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK = 'mac_site_protection_central_sync';
 
 add_filter('cron_schedules', function ($schedules) {
     $schedules['mac_five_minutes'] = ['interval' => 5 * MINUTE_IN_SECONDS, 'display' => 'Every five minutes'];
+    $schedules['mac_one_minute'] = ['interval' => MINUTE_IN_SECONDS, 'display' => 'Every minute'];
     return $schedules;
 });
 
 add_action('init', function () {
+    $event = wp_get_scheduled_event(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK);
+    if ($event && $event->schedule !== 'mac_one_minute') wp_clear_scheduled_hook(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK);
     if (!wp_next_scheduled(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK)) {
-        wp_schedule_event(time() + 120, 'mac_five_minutes', MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK);
+        wp_schedule_event(time() + 60, 'mac_one_minute', MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK);
+    }
+    if (get_option('mac_site_protection_rate_buckets_v1') !== '1') {
+        global $wpdb;
+        $table = $wpdb->prefix . 'site_protection_rate_buckets';
+        $charset = $wpdb->get_charset_collate();
+        $wpdb->query("CREATE TABLE IF NOT EXISTS {$table} (subject VARCHAR(80) NOT NULL, rule_key VARCHAR(32) NOT NULL, bucket_start DATETIME NOT NULL, hits INT UNSIGNED NOT NULL DEFAULT 0, PRIMARY KEY (subject,rule_key,bucket_start), KEY bucket_start (bucket_start)) {$charset}");
+        if (!$wpdb->last_error) update_option('mac_site_protection_rate_buckets_v1', '1', false);
+    }
+    if (get_option('mac_site_protection_incidents_schema_v2') !== '1') {
+        global $wpdb;
+        $table = $wpdb->prefix . 'site_protection_incidents';
+        $index = $wpdb->get_row("SHOW INDEX FROM {$table} WHERE Key_name='daily_incident'", ARRAY_A);
+        if ($index && (int) ($index['Non_unique'] ?? 1) === 0) $wpdb->query("ALTER TABLE {$table} DROP INDEX daily_incident, ADD INDEX daily_incident (ip_address, rule_key, incident_date)");
+        if (!$wpdb->last_error) update_option('mac_site_protection_incidents_schema_v2', '1', false);
     }
 });
 
@@ -114,6 +131,8 @@ function mac_site_protection_central_apply_command(array $command) {
         $settings['ip_whitelist'] = implode("\n", $ipItems);
         update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
         $wpdb->update($wpdb->prefix . 'site_protection_blocks', ['is_active' => 0], ['ip_address' => $subject], ['%d'], ['%s']);
+        delete_transient('mac_sp_block_ranges');
+        $wpdb->delete($wpdb->prefix . 'site_protection_incidents', ['ip_address' => $subject], ['%s']);
         return [true, 'Добавлен в WhiteList'];
     }
     if ($type === 'unwhitelist') {
@@ -124,10 +143,15 @@ function mac_site_protection_central_apply_command(array $command) {
     if ($type === 'unblock') {
         $wpdb->update($wpdb->prefix . 'site_protection_blocks', ['is_active' => 0], ['ip_address' => $subject], ['%d'], ['%s']);
         delete_transient(mac_site_protection_state_key('mac_sp_blocked', $subject));
-        return [true, 'Блокировка снята'];
+        delete_transient('mac_sp_block_ranges');
+        $wpdb->delete($wpdb->prefix . 'site_protection_incidents', ['ip_address' => $subject], ['%s']);
+        return [true, 'Блокировка снята, история нарушений очищена'];
     }
 
     $expiresAt = trim((string) ($command['expires_at'] ?? ''));
+    if (isset($command['expires_at_unix']) && is_numeric($command['expires_at_unix'])) {
+        $expiresAt = wp_date('Y-m-d H:i:s', (int) $command['expires_at_unix']);
+    }
     $table = $wpdb->prefix . 'site_protection_blocks';
     $reason = substr(trim((string) ($command['reason'] ?? 'Решение центра')), 0, 100);
     $existing = $wpdb->get_var($wpdb->prepare(
@@ -155,6 +179,7 @@ function mac_site_protection_central_apply_command(array $command) {
         if ($inserted === false) return [false, 'Не удалось создать блокировку: ' . $wpdb->last_error];
     }
     delete_transient(mac_site_protection_state_key('mac_sp_blocked', $subject));
+    delete_transient('mac_sp_block_ranges');
     return [true, $expiresAt === '' ? 'Заблокирован навсегда' : 'Заблокирован до ' . $expiresAt];
 }
 
@@ -165,6 +190,8 @@ function mac_site_protection_central_apply_settings(array $remote) {
     $settings['rate_limit_minutes'] = max(1, (int)($remote['window_minutes'] ?? $settings['rate_limit_minutes']));
     $settings['xml_rate_limit_minutes'] = $settings['rate_limit_minutes'];
     $settings['protection_mode'] = !empty($remote['auto_block_enabled']) ? 'enforce' : 'monitor';
+    $settings['unverified_bot_limit'] = max(10, (int) ($remote['unverified_bot_limit'] ?? $settings['unverified_bot_limit']));
+    $settings['seo_bot_limit'] = max(10, (int) ($remote['seo_bot_limit'] ?? $settings['seo_bot_limit']));
     update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
 }
 
@@ -187,21 +214,26 @@ function mac_site_protection_central_sync() {
     $eventsTable = $wpdb->prefix . 'site_protection_events';
     $sitemapTable = $wpdb->prefix . 'sitemap_logs';
     $crawlerTable = $wpdb->prefix . 'crawler_logs';
-    $eventsRows = $wpdb->get_results("SELECT * FROM {$eventsTable} ORDER BY id ASC LIMIT 200", ARRAY_A);
-    $sitemapRows = $wpdb->get_results("SELECT * FROM {$sitemapTable} ORDER BY id ASC LIMIT 200", ARRAY_A);
+    $eventsRows = $wpdb->get_results("SELECT * FROM {$eventsTable} ORDER BY id ASC LIMIT 300", ARRAY_A);
+    $sitemapRows = $wpdb->get_results("SELECT * FROM {$sitemapTable} ORDER BY id ASC LIMIT 300", ARRAY_A);
     $crawlerRows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$crawlerTable} WHERE log_date >= %s AND request_count >= %d ORDER BY id ASC LIMIT 300", wp_date('Y-m-d', time() - DAY_IN_SECONDS), MAC_CRAWLER_LOGS_DAILY_THRESHOLD), ARRAY_A);
+    $activeBlocks = $wpdb->get_results("SELECT ip_address,reason,expires_at,blocked_hits FROM {$wpdb->prefix}site_protection_blocks WHERE is_active=1 AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY id DESC LIMIT 501", ARRAY_A);
+    $pendingEvents = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$eventsTable}");
+    $pendingXml = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$sitemapTable}");
+    $blocksComplete = count($activeBlocks) <= 500;
+    $activeBlocks = array_slice($activeBlocks, 0, 500);
     $acks = (array) get_option('mac_site_protection_central_acks', []);
     $vinApiEvents = array_slice((array) get_option('mac_vin_provider_health_queue', []), 0, 50);
-    $payload = ['agent_version' => MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION, 'events' => [], 'sitemap_logs' => [], 'crawler_daily' => [], 'vin_api_events' => $vinApiEvents, 'command_acks' => $acks];
+    $payload = ['agent_version' => MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION, 'events' => [], 'sitemap_logs' => [], 'crawler_daily' => [], 'vin_api_events' => $vinApiEvents, 'command_acks' => $acks, 'active_blocks' => $activeBlocks, 'blocks_complete' => $blocksComplete, 'pending_events' => $pendingEvents, 'pending_xml' => $pendingXml];
 
     foreach ($eventsRows as $row) {
         $payload['events'][] = ['source_key' => 'event-' . (int) $row['id'], 'occurred_at' => $row['created_at'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'rule_key' => $row['rule_key'], 'request_count' => (int) $row['request_count'], 'threshold_count' => (int) $row['threshold_count'], 'action_taken' => $row['action_taken'], 'request_uri' => $row['request_uri'], 'user_agent' => $row['user_agent']];
     }
     foreach ($sitemapRows as $row) {
-        $payload['sitemap_logs'][] = ['source_key' => 'sitemap-' . (int) $row['id'], 'occurred_at' => $row['created_at'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'sitemap_path' => $row['sitemap_path'], 'request_uri' => $row['request_uri'], 'bot_name' => $row['bot_name'], 'response_code' => (int) $row['response_code'], 'referer' => $row['referer'], 'user_agent' => $row['user_agent']];
+        $payload['sitemap_logs'][] = ['source_key' => 'sitemap-' . (int) $row['id'], 'occurred_at' => $row['created_at'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'sitemap_path' => $row['sitemap_path'], 'request_uri' => $row['request_uri'], 'bot_name' => $row['bot_name'], 'verified_bot' => mac_site_protection_cached_official_request($row['user_agent'], $row['ip_address']) ? 1 : 0, 'response_code' => (int) $row['response_code'], 'referer' => $row['referer'], 'user_agent' => $row['user_agent']];
     }
     foreach ($crawlerRows as $row) {
-        $payload['crawler_daily'][] = ['log_date' => $row['log_date'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'bot_name' => $row['bot_name'], 'request_count' => (int) $row['request_count'], 'first_seen' => $row['first_seen'], 'last_seen' => $row['last_seen'], 'last_request_uri' => $row['last_request_uri'], 'last_response_code' => (int) $row['last_response_code'], 'user_agent' => $row['user_agent']];
+        $payload['crawler_daily'][] = ['log_date' => $row['log_date'], 'ip_address' => $row['ip_address'], 'subject' => mac_site_protection_central_row_subject($row['ip_address'], $row['user_agent']), 'bot_name' => $row['bot_name'], 'verified_bot' => mac_site_protection_cached_official_request($row['user_agent'], $row['ip_address']) ? 1 : 0, 'request_count' => (int) $row['request_count'], 'first_seen' => $row['first_seen'], 'last_seen' => $row['last_seen'], 'last_request_uri' => $row['last_request_uri'], 'last_response_code' => (int) $row['last_response_code'], 'user_agent' => $row['user_agent']];
     }
 
     $response = wp_remote_post($config['url'] . '/api/protection.php', ['timeout' => 20, 'headers' => ['Content-Type' => 'application/json', 'X-API-Key' => $config['api_key']], 'body' => wp_json_encode($payload)]);
@@ -247,6 +279,7 @@ function mac_site_protection_central_sync() {
     $cutoff = wp_date('Y-m-d', time() - 2 * DAY_IN_SECONDS);
     $wpdb->query($wpdb->prepare("DELETE FROM {$crawlerTable} WHERE log_date < %s", $cutoff));
     $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->prefix}crawler_log_samples WHERE log_date < %s", $cutoff));
+    $wpdb->query("DELETE FROM {$wpdb->prefix}site_protection_rate_buckets WHERE bucket_start < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 2 DAY) LIMIT 10000");
     $receivedCommandIds = [];
     $newAcks = [];
     foreach ((array) ($body['commands'] ?? []) as $command) {
@@ -317,6 +350,7 @@ function mac_site_protection_settings() {
         'protection_mode' => 'monitor',
         'rate_limit_count' => '200', 'rate_limit_minutes' => '10',
         'xml_rate_limit_count' => '5', 'xml_rate_limit_minutes' => '10',
+        'unverified_bot_limit' => '60', 'seo_bot_limit' => '30',
         'ip_whitelist' => '', 'ua_whitelist' => '', 'telegram_topic_id' => '27659',
     ]);
 }
@@ -389,37 +423,46 @@ function mac_site_protection_whitelisted($ip, $ua) {
     }
     return false;
 }
+function mac_site_protection_matching_block_subjects($ip) {
+    global $wpdb;
+    $subjects = array_values(array_unique(array_filter([$ip, mac_site_protection_ipv6_network($ip)])));
+    $ranges = get_transient('mac_sp_block_ranges');
+    if (!is_array($ranges)) {
+        $ranges = $wpdb->get_col("SELECT ip_address FROM {$wpdb->prefix}site_protection_blocks WHERE is_active=1 AND ip_address LIKE '%/%' AND (expires_at IS NULL OR expires_at > NOW())");
+        set_transient('mac_sp_block_ranges', $ranges, MINUTE_IN_SECONDS);
+    }
+    foreach ($ranges as $range) {
+        if (mac_site_protection_ip_in_cidr($ip, (string) $range)) $subjects[] = (string) $range;
+    }
+    return array_values(array_unique($subjects));
+}
 function mac_site_protection_blocked($ip) {
     global $wpdb;
-    $network = mac_site_protection_ipv6_network($ip);
-    $subjects = array_values(array_unique(array_filter([$ip, $network])));
-    // IPv6 may be checked against both the exact address and its /64. Do not
-    // cache that mixed result, otherwise an exact manual block could leak to
-    // the whole subnet (or a stale false result could delay a new /64 block).
-    if ($network !== '') {
-        return (bool) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}site_protection_blocks WHERE ip_address IN (" . implode(',', array_fill(0, count($subjects), '%s')) . ") AND is_active = 1 AND (expires_at IS NULL OR expires_at > %s) LIMIT 1", ...array_merge($subjects, [current_time('mysql')])));
+    $subjects = mac_site_protection_matching_block_subjects($ip);
+    if (!$subjects) return false;
+    $hasRange = count($subjects) > 1 || strpos((string) $subjects[0], '/') !== false;
+    $key = mac_site_protection_state_key('mac_sp_blocked', $ip);
+    if (!$hasRange) {
+        $cached = get_transient($key);
+        if ($cached !== false) return $cached === '1';
     }
-    $key = mac_site_protection_state_key('mac_sp_blocked', implode('|', $subjects));
-    $cached = get_transient($key);
-    if ($cached !== false) return $cached === '1';
-    $blocked = (bool) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}site_protection_blocks WHERE ip_address IN (" . implode(',', array_fill(0, count($subjects), '%s')) . ") AND is_active = 1 AND (expires_at IS NULL OR expires_at > %s) LIMIT 1", ...array_merge($subjects, [current_time('mysql')])));
-    set_transient($key, $blocked ? '1' : '0', MINUTE_IN_SECONDS);
+    $placeholders = implode(',', array_fill(0, count($subjects), '%s'));
+    $blocked = (bool) $wpdb->get_var($wpdb->prepare("SELECT id FROM {$wpdb->prefix}site_protection_blocks WHERE ip_address IN ({$placeholders}) AND is_active=1 AND (expires_at IS NULL OR expires_at>%s) LIMIT 1", ...array_merge($subjects, [current_time('mysql')])));
+    if (!$hasRange) set_transient($key, $blocked ? '1' : '0', 30);
     return $blocked;
 }
-
 function mac_site_protection_record_block_hit($ip) {
     global $wpdb;
-    $network = mac_site_protection_ipv6_network($ip);
-    $subjects = array_values(array_unique(array_filter([$ip, $network])));
+    $subjects = mac_site_protection_matching_block_subjects($ip);
     if (!$subjects) return;
     $placeholders = implode(',', array_fill(0, count($subjects), '%s'));
-    $query = "UPDATE {$wpdb->prefix}site_protection_blocks SET blocked_hits=blocked_hits+1, last_blocked_at=%s WHERE ip_address IN ({$placeholders}) AND is_active=1 AND (expires_at IS NULL OR expires_at>%s)";
-    $wpdb->query($wpdb->prepare($query, ...array_merge([current_time('mysql')], $subjects, [current_time('mysql')])));
+    $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET blocked_hits=blocked_hits+1, last_blocked_at=%s WHERE ip_address IN ({$placeholders}) AND is_active=1 AND (expires_at IS NULL OR expires_at>%s)", ...array_merge([current_time('mysql')], $subjects, [current_time('mysql')])));
 }
 
 function mac_site_protection_expire_blocks() {
     global $wpdb;
-    $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= %s", current_time('mysql')));
+    $expired = $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= %s", current_time('mysql')));
+    if ($expired) delete_transient('mac_sp_block_ranges');
 }
 function mac_site_protection_escalation_minutes($level) {
     return [
@@ -432,7 +475,7 @@ function mac_site_protection_escalation_minutes($level) {
 }
 function mac_site_protection_register_incident($ip, $rule_key) {
     global $wpdb;
-    $today = current_time('Y-m-d'); $from = wp_date('Y-m-d', current_time('timestamp') - 30 * DAY_IN_SECONDS);
+    $today = current_time('Y-m-d'); $from = wp_date('Y-m-d', time() - 30 * DAY_IN_SECONDS);
     $table = $wpdb->prefix . 'site_protection_incidents';
     $wpdb->insert($table, ['ip_address'=>$ip,'rule_key'=>$rule_key,'incident_date'=>$today,'created_at'=>current_time('mysql'),'level'=>1], ['%s','%s','%s','%s','%d']);
     $incidents = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE ip_address=%s AND rule_key=%s AND incident_date >= %s", $ip, $rule_key, $from));
@@ -448,8 +491,14 @@ function mac_site_protection_block($ip, $reason, $minutes) {
     ));
     if ($already_blocked) return;
     $wpdb->insert($wpdb->prefix . 'site_protection_blocks', ['ip_address' => $ip, 'reason' => $reason, 'created_at' => current_time('mysql'), 'expires_at' => $expires_at, 'is_active' => 1], ['%s','%s','%s','%s','%d']);
-    delete_transient(mac_site_protection_state_key('mac_sp_blocked', implode('|', array_values(array_unique(array_filter([$ip, mac_site_protection_ipv6_network($ip)]))))));
+    delete_transient(mac_site_protection_state_key('mac_sp_blocked', $ip));
 }
+function mac_site_protection_cached_official_request($ua, $ip) {
+    $bot = mac_sitemap_logs_bot_key($ua);
+    if (!in_array($bot, ['googlebot','bingbot','yandexbot'], true) || $ip === '') return false;
+    return get_transient('mac_sp_verified_' . md5($bot . '|' . $ip)) === '1';
+}
+
 function mac_site_protection_is_official_request($ua, $ip = '') {
     $bot = mac_sitemap_logs_bot_key($ua);
     $suffixes = ['googlebot' => ['googlebot.com', 'google.com'], 'bingbot' => ['search.msn.com'], 'yandexbot' => ['yandex.ru', 'yandex.net']];
@@ -461,8 +510,13 @@ function mac_site_protection_is_official_request($ua, $ip = '') {
     $valid = false;
     foreach ($suffixes[$bot] as $suffix) {
         if ($host !== $suffix && substr($host, -strlen('.' . $suffix)) !== '.' . $suffix) continue;
-        $resolved = @gethostbynamel($host) ?: [];
-        $valid = in_array($ip, $resolved, true);
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+            $records = @dns_get_record($host, DNS_AAAA) ?: [];
+            $valid = in_array(inet_pton($ip), array_map('inet_pton', array_column($records, 'ipv6')), true);
+        } else {
+            $resolved = @gethostbynamel($host) ?: [];
+            $valid = in_array($ip, $resolved, true);
+        }
         if ($valid) break;
     }
     // A short negative cache lets a temporary DNS failure recover quickly.
@@ -474,13 +528,16 @@ function mac_site_protection_traffic_class($ua, $ip) {
     if (mac_site_protection_is_official_request($ua, $ip)) return 'official';
     $bot = mac_sitemap_logs_bot_key($ua);
     if (in_array($bot, ['ahrefsbot', 'semrushbot', 'mj12bot'], true)) return 'seo';
-    return $bot === 'visitor' ? 'visitor' : 'unverified_bot';
+    if ($bot !== 'visitor') return 'unverified_bot';
+    return mac_site_protection_browser_signal_score($ua) >= 2 ? 'suspicious_browser' : 'visitor';
 }
 
 function mac_site_protection_is_meaningful_request($path) {
     $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
-    if (strpos($uri, 'wc-ajax=') !== false || strpos($uri, 'rest_route=') !== false) return false;
-    if (preg_match('#^/(?:wp-admin|wp-login\.php|wp-cron\.php|wp-json)(?:/|$)#i', $path)) return false;
+    if (preg_match('#^/(?:wp-admin|wp-login\.php|wp-cron\.php)(?:/|$)#i', $path)) return false;
+    if (preg_match('#^/wp-json(?:/|$)#i', $path) || strpos($uri, 'rest_route=') !== false || strpos($uri, 'wc-ajax=') !== false) {
+        return mac_site_protection_is_public_catalog_api($path, $uri);
+    }
     return preg_match('/\.(?:css|js|map|jpe?g|png|gif|webp|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip)$/i', $path) !== 1;
 }
 
@@ -489,6 +546,14 @@ function mac_site_protection_is_meaningful_request($path) {
  * counters. High search activity is useful to the catalogue and must not
  * create an intensive-crawler record or trigger an IP block.
  */
+function mac_site_protection_is_public_catalog_api($path, $uri) {
+    $route = (string) ($_GET['rest_route'] ?? $path);
+    if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
+    return isset($_GET['wc-ajax'])
+        || preg_match('#^/wc/store(?:/v[0-9]+)?/products(?:/|$)#i', $route) === 1
+        || preg_match('#^/wp/v[0-9]+/search(?:/|$)#i', $route) === 1;
+}
+
 function mac_site_protection_is_site_search_request($wp = null) {
     if (array_key_exists('s', $_GET)) return true;
     if (is_object($wp) && isset($wp->query_vars) && array_key_exists('s', (array) $wp->query_vars)) return true;
@@ -542,17 +607,13 @@ function mac_site_protection_browser_signal_score($ua) {
 }
 
 function mac_site_protection_increment_window($ip, $rule_key, $minutes, $max_hits) {
-    // One small transient per IP/rule. The stored timestamps make the window
-    // rolling rather than aligned to an arbitrary ten-minute boundary.
-    $key = mac_site_protection_state_key('mac_sp_window', $ip . '|' . $rule_key);
-    $now = time();
-    $cutoff = $now - $minutes * MINUTE_IN_SECONDS;
-    $hits = get_transient($key);
-    $hits = is_array($hits) ? array_values(array_filter($hits, static function ($time) use ($cutoff) { return (int) $time > $cutoff; })) : [];
-    $hits[] = $now;
-    $max_hits = max(2, (int) $max_hits);
-    set_transient($key, array_slice($hits, -$max_hits), $minutes * MINUTE_IN_SECONDS + MINUTE_IN_SECONDS);
-    return count($hits);
+    global $wpdb;
+    $table = $wpdb->prefix . 'site_protection_rate_buckets';
+    $bucket = gmdate('Y-m-d H:i:00');
+    $cutoff = gmdate('Y-m-d H:i:00', time() - (max(1, (int) $minutes) - 1) * MINUTE_IN_SECONDS);
+    $wpdb->query($wpdb->prepare("INSERT INTO {$table} (subject,rule_key,bucket_start,hits) VALUES (%s,%s,%s,1) ON DUPLICATE KEY UPDATE hits=hits+1", $ip, $rule_key, $bucket));
+    if ($wpdb->last_error) return 0;
+    return (int) $wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(hits),0) FROM {$table} WHERE subject=%s AND rule_key=%s AND bucket_start >= %s", $ip, $rule_key, $cutoff));
 }
 
 function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, $ua) {
@@ -566,6 +627,8 @@ function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, 
 }
 
 function mac_site_protection_reject($retry_after, $message = 'Too many requests. Please try again later.') {
+    mac_sitemap_logs_begin_request();
+    mac_crawler_logs_begin_request();
     nocache_headers();
     status_header(429);
     header('Content-Type: text/plain; charset=utf-8');
@@ -600,7 +663,8 @@ function mac_site_protection_enforce_v2($wp = null) {
     if (is_admin() || (is_user_logged_in() && current_user_can('manage_options'))) return;
     $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     if (!in_array($method, ['GET', 'HEAD'], true)) return;
-    if (mac_site_protection_is_site_search_request($wp)) return;
+    $requestPath = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+    if (mac_site_protection_is_site_search_request($wp) && !mac_site_protection_is_public_catalog_api($requestPath, (string) ($_SERVER['REQUEST_URI'] ?? ''))) return;
 
     $ip = mac_site_protection_client_ip();
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
@@ -649,6 +713,9 @@ function mac_site_protection_enforce_v2($wp = null) {
     if ($s['rate_limit_enabled'] !== '1' || $is_xml || !mac_site_protection_is_meaningful_request($path)) return;
     $minutes = max(1, (int) $s['rate_limit_minutes']);
     $limit = max(30, (int) $s['rate_limit_count']);
+    if ($class === 'unverified_bot') $limit = max(10, (int) ($s['unverified_bot_limit'] ?? $limit));
+    if ($class === 'seo') $limit = max(10, (int) ($s['seo_bot_limit'] ?? $limit));
+    if ($class === 'suspicious_browser') $limit = min($limit, max(10, (int) ($s['unverified_bot_limit'] ?? $limit)));
     $rule_key = 'site_rate_auto';
     $subject = mac_site_protection_subject($ip, $class);
     $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
@@ -690,62 +757,16 @@ function mac_site_protection_page_v2() {
     ];
     ?>
     <div class="wrap mac-protection-content">
-        <div class="mac-section-title"><h1>Защита сайта</h1><p>Сайт работает как исполнитель: история и ручные решения находятся в центральном сайте; очередь проверяется примерно раз в 5 минут.</p></div>
+        <div class="mac-section-title"><h1>Защита сайта</h1><p>Сайт работает как исполнитель: история и ручные решения находятся в центральном сайте; очередь проверяется примерно раз в минуту при работающем WP-Cron.</p></div>
         <?php if (false): // Diagnostics remain stored for troubleshooting, but are not part of the executor UI. ?>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p><?php if ($syncStatus): ?><p><strong>Последняя синхронизация:</strong> <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><br><strong>Результат:</strong> <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'Неизвестно'); ?><?php if (!empty($syncStatus['http_code'])): ?> (HTTP <?php echo (int) $syncStatus['http_code']; ?>)<?php endif; ?><?php if (!empty($syncStatus['received_commands'])): ?><br><strong>Команды от центра:</strong> <?php echo esc_html(implode(', ', array_map('intval', (array) $syncStatus['received_commands']))); ?><?php endif; ?><?php if (!empty($syncStatus['command_results'])): ?><br><strong>Применение:</strong> <?php foreach ((array) $syncStatus['command_results'] as $result): ?><?php echo esc_html('#' . (int) ($result['id'] ?? 0) . ': ' . (!empty($result['ok']) ? 'успешно' : 'ошибка') . (!empty($result['message']) ? ' — ' . (string) $result['message'] : '') . ' '); ?><?php endforeach; ?><?php endif; ?><?php if (!empty($syncStatus['ack_state']) && $syncStatus['ack_state'] !== 'not_required'): ?><br><strong>Подтверждение центру:</strong> <?php echo esc_html($syncStatus['ack_state'] === 'confirmed' ? 'отправлено' : (string) $syncStatus['ack_state']); ?><?php endif; ?><?php if (!empty($syncStatus['error'])): ?><br><strong>Ошибка:</strong> <?php echo esc_html(wp_trim_words((string) $syncStatus['error'], 30, '…')); ?><?php endif; ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form></section>
         <?php endif; ?>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>WhiteList IP</h2></div><p><?php echo $settings['ip_whitelist'] !== '' ? nl2br(esc_html($settings['ip_whitelist'])) : 'Пусто'; ?></p></section>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th><th>Отклонено</th><th>Последняя попытка</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo number_format_i18n((int) ($block['blocked_hits'] ?? 0)); ?></td><td><?php echo esc_html($block['last_blocked_at'] ?: '—'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
-        <section class="mac-protection-panel mac-protection-guide"><div class="mac-panel-head"><h2>Как работает защита</h2></div><p>Сайт исполняет правила из центра и сам не создаёт постоянных ручных решений. При блокировке он отвечает <code>429 Too Many Requests</code>; счётчики в таблице показывают только новые отклонённые запросы после установки этой версии.</p><h3>Причины блокировок</h3><ul><li><strong>Массовая блокировка по отчёту защиты</strong> или <strong>Ручное решение из центра</strong> — решение администратора из центрального сайта. Срок указан в столбце «До».</li><li><strong>Превышен лимит запросов</strong> — интенсивные обращения к обычным страницам. Лимит и срок задаются в центре; повторные превышения усиливают блокировку: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</li><li><strong>Превышен лимит XML</strong> — слишком частые запросы к XML-картам сайта. Для него действует отдельный, более низкий лимит из центра.</li><li><strong>Honeypot crawler trap</strong> — запрос к скрытой ссылке <code>/mac-crawler-trap/</code>, которая запрещена в robots.txt. Это признак парсера, игнорирующего robots.txt и скрытые ссылки; срок такой блокировки — 7 дней.</li></ul><h3>Схема работы</h3><ol><li>Сначала проверяются WhiteList и уже активные блокировки.</li><li>Поисковые запросы сайта не учитываются и не ограничиваются.</li><li>Официальные Google, Bing и Яндекс не ограничиваются после проверки происхождения.</li><li>Остальные запросы проходят лимиты страниц и XML-карт; срабатывания и агрегированная статистика отправляются в центр.</li><li>Центр выдаёт ручные решения и лимиты, а сайт проверяет очередь примерно раз в 5 минут.</li></ol></section>
+        <section class="mac-protection-panel mac-protection-guide"><div class="mac-panel-head"><h2>Как работает защита</h2></div><p>Сайт исполняет правила из центра и сам не создаёт постоянных ручных решений. При блокировке он отвечает <code>429 Too Many Requests</code>; счётчики в таблице показывают только новые отклонённые запросы после установки этой версии.</p><h3>Причины блокировок</h3><ul><li><strong>Массовая блокировка по отчёту защиты</strong> или <strong>Ручное решение из центра</strong> — решение администратора из центрального сайта. Срок указан в столбце «До».</li><li><strong>Превышен лимит запросов</strong> — интенсивные обращения к обычным страницам. Лимит и срок задаются в центре; повторные превышения усиливают блокировку: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</li><li><strong>Превышен лимит XML</strong> — слишком частые запросы к XML-картам сайта. Для него действует отдельный, более низкий лимит из центра.</li><li><strong>Honeypot crawler trap</strong> — запрос к уникальному для этого сайта скрытому пути, запрещённому в robots.txt. Это признак парсера, игнорирующего robots.txt и скрытые ссылки; срок такой блокировки — 7 дней.</li></ul><h3>Схема работы</h3><ol><li>Сначала проверяются WhiteList и уже активные блокировки.</li><li>Поисковые запросы сайта не учитываются и не ограничиваются.</li><li>Официальные Google, Bing и Яндекс не ограничиваются после проверки происхождения.</li><li>Остальные запросы проходят лимиты страниц и XML-карт; срабатывания и агрегированная статистика отправляются в центр.</li><li>Центр выдаёт ручные решения и лимиты, а сайт проверяет очередь примерно раз в минуту при работающем WP-Cron.</li></ol></section>
     </div>
     <?php
-    return;
-    $s = mac_site_protection_settings(); ?>
-    <div class="mac-protection-content">
-        <?php if (isset($_GET['reset'])): ?><div class="notice notice-success is-dismissible"><p>Состояние защиты и журнал интенсивных обходов сброшены. Режим переключён на «Только логировать».</p></div><?php endif; ?>
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mac-protection-settings">
-            <?php wp_nonce_field('mac_site_protection_save'); ?><input type="hidden" name="action" value="mac_site_protection_save">
-            <section class="mac-setting-card"><h2>Режим работы</h2><label>Защита<select name="protection_mode"><option value="monitor" <?php selected($s['protection_mode'], 'monitor'); ?>>Только логировать</option><option value="enforce" <?php selected($s['protection_mode'], 'enforce'); ?>>Блокировать по правилам</option></select></label><p class="description">Начните с режима «Только логировать» на 7 дней. В нём видны превышения, но посетители не получают 429.</p></section>
-            <section class="mac-setting-card"><h2>Порог обходов страниц</h2><div class="mac-inline-fields"><label>Запросов<input type="number" name="rate_limit_count" value="<?php echo esc_attr($s['rate_limit_count']); ?>" min="30"></label><label>Окно, минут<input type="number" name="rate_limit_minutes" value="<?php echo esc_attr($s['rate_limit_minutes']); ?>" min="1"></label></div><p class="description">Для всех неофициальных источников действует единый порог. Официальные Google, Bing и Яндекс после DNS-проверки не ограничиваются.</p></section>
-            <section class="mac-setting-card"><h2>Правила XML</h2><label class="mac-switch-row"><input type="checkbox" name="xml_rate_limit_enabled" <?php checked($s['xml_rate_limit_enabled'], '1'); ?>><span>Ограничивать интенсивный просмотр XML-карт</span></label><div class="mac-inline-fields"><label>XML запросов<input type="number" name="xml_rate_limit_count" value="<?php echo esc_attr($s['xml_rate_limit_count']); ?>" min="2"></label><label>За минут<input type="number" name="xml_rate_limit_minutes" value="<?php echo esc_attr($s['xml_rate_limit_minutes']); ?>" min="1"></label></div><label class="mac-switch-row"><input type="checkbox" name="rate_limit_enabled" <?php checked($s['rate_limit_enabled'], '1'); ?>><span>Включить защиту интенсивных обходов</span></label><p class="description">При синхронизации с центром эти значения и режим защиты управляются из центра. Лестница блокировок: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</p></section>
-            <section class="mac-setting-card"><h2>Исключения и отчёты</h2><label>Topic ID Telegram<input type="text" name="telegram_topic_id" value="<?php echo esc_attr($s['telegram_topic_id']); ?>"></label><label>WhiteList IP<textarea name="ip_whitelist" rows="4"><?php echo esc_textarea($s['ip_whitelist']); ?></textarea></label><label>WhiteList User-Agent<textarea name="ua_whitelist" rows="4"><?php echo esc_textarea($s['ua_whitelist']); ?></textarea></label></section>
-            <div class="mac-settings-save"><button class="button button-primary">Сохранить изменения</button></div>
-        </form>
-        <?php mac_site_protection_render_blocks(); mac_site_protection_render_events(); mac_site_protection_render_xml_blocks(); mac_sitemap_logs_render_admin_table(); mac_crawler_logs_render_admin_table(); ?>
-        <section class="mac-help mac-protection-guide"><h2>Как использовать</h2><ol><li><strong>Режим работы.</strong> Начните с «Только логировать» на 7 дней. Таблица «Срабатывания защиты» покажет превышения без ответов 429. Затем включайте «Блокировать по правилам» только после проверки порогов.</li><li><strong>Пороги.</strong> Отдельно задаются для посетителей, неофициальных ботов и SEO-краулеров. Google, Bing и Яндекс не ограничиваются только после DNS-подтверждения. Первое превышение в боевом режиме даёт throttle на 5 минут; повторные нарушения усиливают временную блокировку.</li><li><strong>Расшифровка правил.</strong> <code>xml_rate</code> — слишком частые открытия XML-карт; <code>site_visitor</code> — интенсивный обход с признаками обычного браузера; <code>site_suspicious_browser</code> — браузерный User-Agent, но отсутствуют минимум два сигнала реального браузера (cookie, Accept-Language, корректный Accept); <code>site_seo</code> — Ahrefs, Semrush или MJ12; <code>site_unverified_bot</code> — бот/сканер, который не прошёл подтверждение как официальный; <code>honeypot</code> — открыта скрытая ссылка, запрещённая в robots.txt.</li><li><strong>IPv6.</strong> Для <code>site_suspicious_browser</code>, <code>site_unverified_bot</code> и <code>honeypot</code> адреса одной IPv6-подсети /64 считаются единым источником. Это не даёт парсеру обходить лимит простой сменой последнего сегмента IP.</li><li><strong>Логи карты сайта.</strong> Здесь каждый просмотр XML-карты: дата, бот, URL, IP, код ответа, referer и User-Agent. Цветная точка у IP отражает тип запроса. «Ограниченные XML-карты» — только запросы с 403/429.</li><li><strong>Интенсивные обходы.</strong> Одна строка — один IP за день с 100+ запросами. Кнопка с глазом открывает 15 последних URL и статусов. Это журнал наблюдения, а не автоматический приговор.</li><li><strong>Блокировки и WhiteList.</strong> WL↺ снимает все блокировки IP, обнуляет историю инцидентов и добавляет IP в WhiteList. Кнопки 1ч, 24ч и ∞ — только ручные действия.</li><li><strong>Когда нужен WAF.</strong> Если блокировки стабильно выше 100 в час, сайт заметно замедляется или атака идёт множеством IP, переносите защиту в Cloudflare/WAF или Nginx. WordPress видит запрос только после запуска PHP.</li></ol></section>
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mac-protection-reset">
-            <?php wp_nonce_field('mac_site_protection_reset'); ?><input type="hidden" name="action" value="mac_site_protection_reset">
-            <strong>Начать наблюдение с нуля</strong><span>Удалит блокировки, историю инцидентов, срабатывания и интенсивные обходы. Логи карт сайта и поиска останутся.</span><button class="button" type="submit" onclick="return confirm('Сбросить состояние защиты и журналы интенсивных обходов? Активные и ручные блокировки тоже будут сняты.');">Сбросить состояние защиты</button>
-        </form>
-        <script>
-        document.querySelectorAll('.mac-protection-content .widefat td').forEach(function (cell) {
-            if (cell.querySelector('button,form,a,input')) return;
-            var value = cell.textContent.trim(); if (!value || value === '—') return;
-            cell.classList.add('mac-copyable'); cell.title = value;
-            cell.addEventListener('click', function () {
-                if (!navigator.clipboard) return;
-                navigator.clipboard.writeText(value).then(function () { cell.classList.add('mac-copied'); setTimeout(function () { cell.classList.remove('mac-copied'); }, 700); });
-            });
-        });
-        document.addEventListener('click', function (event) {
-            var link = event.target.closest('.mac-pagination a[data-mac-page]');
-            if (!link) return;
-            event.preventDefault();
-            var panelName = link.dataset.macPage;
-            var currentPanel = document.querySelector('[data-mac-panel="' + panelName + '"]');
-            if (!currentPanel) return;
-            currentPanel.classList.add('is-loading');
-            fetch(link.href, {credentials: 'same-origin'}).then(function (response) { return response.text(); }).then(function (html) {
-                var nextDocument = new DOMParser().parseFromString(html, 'text/html');
-                var nextPanel = nextDocument.querySelector('[data-mac-panel="' + panelName + '"]');
-                if (!nextPanel) throw new Error('Panel not found');
-                currentPanel.replaceWith(nextPanel);
-                history.replaceState({}, '', link.href);
-            }).catch(function () { window.location.href = link.href; });
-        });
-        </script>
-    </div>
-<?php }
+}
 
 add_action('admin_menu', function () { if (defined('MAC_MASTER_ACTIVE') && MAC_MASTER_ACTIVE) add_submenu_page('master-auto-catalog', 'Защита сайта', 'Защита сайта', 'manage_options', 'mac-site-protection', 'mac_site_protection_page_v2'); }, 30);
 
@@ -772,32 +793,6 @@ add_action('admin_post_mac_site_protection_reset', function () {
     wp_safe_redirect(admin_url('admin.php?page=mac-site-protection&reset=1'));
     exit;
 });
-
-function mac_site_protection_render_blocks() { global $wpdb; mac_site_protection_expire_blocks(); $page=max(1,(int)($_GET['blocks_paged']??1)); $total=(int)$wpdb->get_var("SELECT COUNT(*) FROM {$wpdb->prefix}site_protection_blocks"); $rows=$wpdb->get_results($wpdb->prepare("SELECT * FROM {$wpdb->prefix}site_protection_blocks ORDER BY id DESC LIMIT 15 OFFSET %d",($page-1)*15),ARRAY_A); ?><div class="mac-protection-panel" data-mac-panel="blocks"><div class="mac-panel-head"><h2>Блокировки IP</h2><?php mac_logs_cleanup_buttons('blocks'); ?></div><table class="widefat striped"><thead><tr><th>IP</th><th>Причина</th><th>Создана</th><th>До</th><th>Статус</th><th></th></tr></thead><tbody><?php foreach ($rows as $r): $expired=$r['expires_at']&&strtotime($r['expires_at'])<=current_time('timestamp'); ?><tr><td><?php echo esc_html($r['ip_address']); ?></td><td><?php echo esc_html($r['reason']); ?></td><td><?php echo esc_html($r['created_at']); ?></td><td><?php echo esc_html($r['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo $r['is_active'] ? ($r['expires_at'] ? 'Активна' : 'Постоянная') : ($expired ? 'Истекла' : 'Снята'); ?></td><td><?php if ($r['is_active']): ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_action'); ?><input type="hidden" name="action" value="mac_site_protection_action"><input type="hidden" name="ip" value="<?php echo esc_attr($r['ip_address']); ?>"><button name="protection_action" value="unblock" class="button button-small">Снять</button></form><?php endif; ?></td></tr><?php endforeach; ?></tbody></table><?php mac_site_protection_pager('blocks_paged',$total,$page,'blocks'); ?></div><?php }
-
-function mac_site_protection_render_xml_blocks() { global $wpdb; $page=max(1,(int)($_GET['xml_blocks_paged']??1)); $table=$wpdb->prefix.'sitemap_logs'; $total=(int)$wpdb->get_var("SELECT COUNT(*) FROM {$table} WHERE response_code IN (403,429)"); $rows=$wpdb->get_results($wpdb->prepare("SELECT created_at, ip_address, sitemap_path, request_uri, bot_name, user_agent, response_code FROM {$table} WHERE response_code IN (403,429) ORDER BY id DESC LIMIT 15 OFFSET %d",($page-1)*15),ARRAY_A); ?><div class="mac-protection-panel" data-mac-panel="xml-blocks"><div class="mac-panel-head"><h2>Ограниченные XML-карты</h2><?php mac_logs_cleanup_buttons('xml_restricted'); ?></div><table class="widefat striped"><thead><tr><th>Дата</th><th>Ответ</th><th>IP</th><th>Карта</th><th>Бот</th><th>User-Agent</th><th></th></tr></thead><tbody><?php if ($rows): foreach ($rows as $row): $response=(int)$row['response_code']; ?><tr><td><?php echo esc_html($row['created_at']); ?></td><td title="<?php echo $response === 429 ? 'Новый лимит XML' : 'Ответ от другого или старого правила'; ?>"><?php echo $response === 429 ? '429 лимит' : '403 правило'; ?></td><td><?php echo esc_html($row['ip_address']); ?></td><td><?php echo esc_html($row['request_uri'] ?: $row['sitemap_path']); ?></td><td><?php echo esc_html($row['bot_name']); ?></td><td><?php echo esc_html($row['user_agent']); ?></td><td><?php mac_site_protection_action_buttons($row['ip_address']); ?></td></tr><?php endforeach; else: ?><tr><td colspan="7">Ограниченных запросов пока нет.</td></tr><?php endif; ?></tbody></table><?php mac_site_protection_pager('xml_blocks_paged',$total,$page,'xml-blocks'); ?></div><?php }
-
-function mac_site_protection_render_events() {
-    global $wpdb;
-    $table = $wpdb->prefix . 'site_protection_events';
-    $page = max(1, (int) ($_GET['protection_events_paged'] ?? 1));
-    $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
-    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} ORDER BY id DESC LIMIT 15 OFFSET %d", ($page - 1) * 15), ARRAY_A);
-    ?><div class="mac-protection-panel" data-mac-panel="events"><div class="mac-panel-head"><h2>Срабатывания защиты</h2><?php mac_logs_cleanup_buttons('protection_events'); ?></div><table class="widefat striped"><thead><tr><th>Дата</th><th>Правило</th><th>IP</th><th>Запросов</th><th>Действие</th><th>URL</th></tr></thead><tbody><?php if ($rows): foreach ($rows as $row): ?><tr><td><?php echo esc_html($row['created_at']); ?></td><td><?php echo esc_html($row['rule_key']); ?></td><td><?php echo esc_html($row['ip_address']); ?></td><td><?php echo (int) $row['request_count']; ?> / <?php echo (int) $row['threshold_count']; ?></td><td><?php echo $row['action_taken'] === 'monitor' ? 'Только лог' : ($row['action_taken'] === 'throttle' ? 'Throttle 5 мин.' : 'Блокировка'); ?></td><td><?php echo esc_html($row['request_uri']); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Превышений пока нет.</td></tr><?php endif; ?></tbody></table><?php mac_site_protection_pager('protection_events_paged', $total, $page, 'events'); ?></div><?php
-}
-
-function mac_site_protection_pager($key, $total, $page, $panel = '') { $pages = max(1, (int) ceil($total / 15)); if ($pages < 2) return; $shown = array_unique(array_filter([1,2,3,$page-1,$page,$page+1,$pages-2,$pages-1,$pages], function($n) use($pages){return $n>0&&$n<=$pages;})); sort($shown); $last=0; echo '<nav class="mac-pagination" aria-label="Пагинация">'; foreach($shown as $n){if($last&&$n>$last+1)echo '<span class="mac-pagination-gap">&hellip;</span>'; echo $n===$page?'<span class="is-current">'.$n.'</span>':'<a data-mac-page="'.esc_attr($panel).'" href="'.esc_url(add_query_arg($key,$n)).'">'.$n.'</a>'; $last=$n;} echo '</nav>'; }
-
-function mac_site_protection_action_buttons($ip) { ?>
-<form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" class="mac-ip-actions">
-    <?php wp_nonce_field('mac_site_protection_action'); ?>
-    <input type="hidden" name="action" value="mac_site_protection_action"><input type="hidden" name="ip" value="<?php echo esc_attr($ip); ?>">
-    <button name="protection_action" value="whitelist" class="button button-small" title="Обнулить блокировки и добавить в WhiteList">WL↺</button><button name="protection_action" value="block_1h" class="button button-small" title="Заблокировать на 1 час">1ч</button><button name="protection_action" value="block_1d" class="button button-small" title="Заблокировать на сутки">24ч</button><button name="protection_action" value="block_forever" class="button button-small button-link-delete" title="Заблокировать навсегда">∞</button>
-</form>
-<?php }
-
-const MAC_CRAWLER_LOGS_DAILY_THRESHOLD = 100;
-const MAC_CRAWLER_LOG_SAMPLES_LIMIT = 15;
 
 function mac_sitemap_logs_normalize_path($path)
 {
@@ -862,19 +857,6 @@ function mac_site_protection_is_authenticated_central_request($request_uri = '')
     $configured_key = trim((string) get_option('cas_sync_key', ''));
     $provided_key = trim((string) ($_SERVER['HTTP_X_API_KEY'] ?? ''));
     return $configured_key !== '' && $provided_key !== '' && hash_equals($configured_key, $provided_key);
-}
-
-function mac_sitemap_logs_is_official_bot($bot_name)
-{
-    return in_array($bot_name, ['Googlebot', 'YandexBot', 'Bingbot', 'DuckDuckBot', 'BaiduSpider', 'Applebot'], true);
-}
-
-function mac_site_protection_xml_decision(array $row) {
-    if ((int) ($row['response_code'] ?? 0) === 403) return ['Заблокирован', 'mac-dot-danger'];
-    $bot = (string) ($row['bot_name'] ?? '');
-    if (mac_sitemap_logs_is_official_bot($bot)) return ['Официальный бот', 'mac-dot-good'];
-    if ($bot === 'Другой бот') return ['Неофициальный бот', 'mac-dot-warn'];
-    return ['Подозрительный запрос', 'mac-dot-danger'];
 }
 
 function mac_sitemap_logs_begin_request()
@@ -1047,133 +1029,3 @@ add_action('wp_ajax_mac_crawler_logs_details', function () {
 
     wp_send_json_success(['rows' => $rows]);
 });
-
-function mac_sitemap_logs_render_admin_table()
-{
-    global $wpdb;
-    $table = $wpdb->prefix . 'sitemap_logs';
-    $per_page = 15;
-    $page = max(1, (int) ($_GET['sitemap_paged'] ?? 1));
-    $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE user_agent NOT LIKE %s", '%AccelerateWP/Preload%'));
-    $pages = max(1, (int) ceil($total / $per_page));
-    $page = min($page, $pages);
-    $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$table} WHERE user_agent NOT LIKE %s ORDER BY id DESC LIMIT %d OFFSET %d", '%AccelerateWP/Preload%', $per_page, ($page - 1) * $per_page), ARRAY_A);
-    $base_url = admin_url('admin.php?page=mac-site-protection');
-    ?>
-    <div class="postbox" data-mac-panel="sitemap" style="margin:20px 0;background:white;border:1px solid #ccd0d4;border-radius:4px;">
-        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;display:flex;justify-content:space-between;align-items:center;gap:10px;"><h2 style="margin:0;">Логи карты сайта</h2><?php mac_logs_cleanup_buttons('sitemap'); ?></div>
-        <div class="inside" style="padding:15px;overflow-x:auto;">
-            <p>Записей: <strong><?php echo number_format_i18n($total); ?></strong></p>
-            <table class="widefat striped">
-                <thead><tr><th>Дата</th><th>Бот / посетитель</th><th>URL карты</th><th>IP</th><th>Статус</th><th>Referer</th><th>User-Agent</th><th>Действия</th></tr></thead>
-                <tbody>
-                <?php if ($rows): foreach ($rows as $row): $decision = mac_site_protection_xml_decision($row); ?>
-                    <tr>
-                        <td><?php echo esc_html(date_i18n('d.m.Y H:i:s', strtotime($row['created_at']))); ?></td>
-                        <td><?php echo esc_html($row['bot_name'] ?: '—'); ?></td>
-                        <td style="word-break:break-word;max-width:220px;"><?php echo esc_html($row['request_uri'] ?: $row['sitemap_path']); ?></td>
-                        <td><span class="mac-decision-dot <?php echo esc_attr($decision[1]); ?>" title="<?php echo esc_attr($decision[0]); ?>" aria-label="<?php echo esc_attr($decision[0]); ?>"></span><?php echo esc_html($row['ip_address'] ?: '—'); ?></td>
-                        <td><?php echo esc_html($row['response_code']); ?></td>
-                        <td style="word-break:break-word;max-width:220px;"><?php echo esc_html($row['referer'] ?: '—'); ?></td>
-                        <td style="word-break:break-word;min-width:260px;"><?php echo esc_html($row['user_agent'] ?: '—'); ?></td>
-                        <td><?php mac_site_protection_action_buttons($row['ip_address']); ?></td>
-                    </tr>
-                <?php endforeach; else: ?>
-                    <tr><td colspan="8">Запросов к XML-картам сайта пока не было.</td></tr>
-                <?php endif; ?>
-                </tbody>
-            </table>
-            <?php mac_site_protection_pager('sitemap_paged', $total, $page, 'sitemap'); ?>
-        </div>
-    </div>
-    <?php
-}
-
-function mac_crawler_logs_render_admin_table()
-{
-    global $wpdb;
-
-    $table = $wpdb->prefix . 'crawler_logs';
-    $per_page = 15;
-    $page = max(1, (int) ($_GET['crawler_paged'] ?? 1));
-    $threshold = MAC_CRAWLER_LOGS_DAILY_THRESHOLD;
-    $total = (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$table} WHERE request_count >= %d AND user_agent NOT LIKE %s", $threshold, '%AccelerateWP/Preload%'));
-    $pages = max(1, (int) ceil($total / $per_page));
-    $page = min($page, $pages);
-    $rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT * FROM {$table} WHERE request_count >= %d AND user_agent NOT LIKE %s ORDER BY log_date DESC, request_count DESC, last_seen DESC LIMIT %d OFFSET %d",
-        $threshold,
-        '%AccelerateWP/Preload%',
-        $per_page,
-        ($page - 1) * $per_page
-    ), ARRAY_A);
-    $base_url = admin_url('admin.php?page=mac-site-protection');
-    ?>
-    <div class="postbox" data-mac-panel="crawler" style="margin:20px 0;background:white;border:1px solid #ccd0d4;border-radius:4px;">
-        <div class="postbox-header" style="background:#f1f1f1;padding:10px 15px;border-bottom:1px solid #ccd0d4;display:flex;justify-content:space-between;align-items:center;gap:10px;"><h2 style="margin:0;">Интенсивные обходы страниц</h2><?php mac_logs_cleanup_buttons('crawler'); ?></div>
-        <div class="inside" style="padding:15px;overflow-x:auto;">
-            <p>Показаны IP с <?php echo (int) $threshold; ?> и более запросами за один день. Одна строка — один IP за день.</p>
-            <table class="widefat striped">
-                <thead><tr><th>Дата</th><th>Бот / посетитель</th><th>IP</th><th>Запросов</th><th>Первый / последний</th><th>Последний URL</th><th>User-Agent</th><th>Действия</th><th>Запросы</th></tr></thead>
-                <tbody>
-                <?php if ($rows): foreach ($rows as $row): ?>
-                    <tr>
-                        <td><?php echo esc_html(date_i18n('d.m.Y', strtotime($row['log_date']))); ?></td>
-                        <td><?php echo esc_html($row['bot_name'] ?: '—'); ?></td>
-                        <td><?php echo esc_html($row['ip_address']); ?></td>
-                        <td><strong><?php echo number_format_i18n((int) $row['request_count']); ?></strong></td>
-                        <td><?php echo esc_html(date_i18n('H:i:s', strtotime($row['first_seen'])) . ' — ' . date_i18n('H:i:s', strtotime($row['last_seen']))); ?></td>
-                        <td style="word-break:break-word;max-width:260px;"><?php echo esc_html($row['last_request_uri'] ?: '—'); ?></td>
-                        <td style="word-break:break-word;min-width:260px;"><?php echo esc_html($row['user_agent'] ?: '—'); ?></td>
-                        <td><?php mac_site_protection_action_buttons($row['ip_address']); ?></td><td><button type="button" class="button button-small mac-crawler-log-details" title="Последние 15 запросов" data-date="<?php echo esc_attr($row['log_date']); ?>" data-ip="<?php echo esc_attr($row['ip_address']); ?>">👁</button></td>
-                    </tr>
-                <?php endforeach; else: ?>
-                    <tr><td colspan="8">IP с высокой активностью пока не найдено.</td></tr>
-                <?php endif; ?>
-                </tbody>
-            </table>
-            <?php mac_site_protection_pager('crawler_paged', $total, $page, 'crawler'); ?>
-        </div>
-    </div>
-    <div id="mac-crawler-log-modal" style="display:none;position:fixed;z-index:100000;inset:0;background:rgba(0,0,0,.45);padding:40px 20px;overflow:auto;">
-        <div style="background:#fff;max-width:1000px;margin:0 auto;padding:20px;border-radius:6px;position:relative;">
-            <button type="button" id="mac-crawler-log-modal-close" class="button-link" style="position:absolute;right:15px;top:12px;font-size:22px;">&times;</button>
-            <h2 style="margin-top:0;">Последние 15 запросов</h2>
-            <div id="mac-crawler-log-modal-content">Загрузка&hellip;</div>
-        </div>
-    </div>
-    <script>
-    (function () {
-        var modal = document.getElementById('mac-crawler-log-modal');
-        var content = document.getElementById('mac-crawler-log-modal-content');
-        var close = document.getElementById('mac-crawler-log-modal-close');
-        var escapeHtml = function (value) { var node = document.createElement('span'); node.textContent = value || '—'; return node.innerHTML; };
-        var closeModal = function () { modal.style.display = 'none'; };
-        close.addEventListener('click', closeModal);
-        modal.addEventListener('click', function (event) { if (event.target === modal) closeModal(); });
-        document.addEventListener('keydown', function (event) { if (event.key === 'Escape') closeModal(); });
-        document.querySelectorAll('.mac-crawler-log-details').forEach(function (button) {
-            button.addEventListener('click', function () {
-                modal.style.display = 'block';
-                content.textContent = 'Загрузка…';
-                var form = new FormData();
-                form.append('action', 'mac_crawler_logs_details');
-                form.append('nonce', '<?php echo esc_js(wp_create_nonce('mac_crawler_logs_details')); ?>');
-                form.append('log_date', button.dataset.date);
-                form.append('ip_address', button.dataset.ip);
-                fetch(ajaxurl, { method: 'POST', credentials: 'same-origin', body: form }).then(function (response) { return response.json(); }).then(function (response) {
-                    if (!response.success) throw new Error(response.data && response.data.message ? response.data.message : 'Ошибка загрузки.');
-                    if (!response.data.rows.length) { content.textContent = 'Детальные записи появятся для новых запросов после обновления плагина.'; return; }
-                    var html = '<table class="widefat striped"><thead><tr><th>Время</th><th>URL</th><th>Статус</th><th>Referer</th></tr></thead><tbody>';
-                    response.data.rows.forEach(function (row) {
-                        var url = <?php echo wp_json_encode(home_url('/')); ?>.replace(/\/$/, '') + (row.request_uri || '');
-                        html += '<tr><td>' + escapeHtml(row.created_at) + '</td><td style="word-break:break-word;"><a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + escapeHtml(row.request_uri) + '</a></td><td>' + escapeHtml(String(row.response_code || '—')) + '</td><td style="word-break:break-word;">' + escapeHtml(row.referer) + '</td></tr>';
-                    });
-                    content.innerHTML = html + '</tbody></table>';
-                }).catch(function (error) { content.textContent = error.message; });
-            });
-        });
-    }());
-    </script>
-    <?php
-}
