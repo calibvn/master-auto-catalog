@@ -662,6 +662,16 @@ function cas_sync_key_authorized(WP_REST_Request $request): bool {
 }
 
 add_action('rest_api_init', function () {
+    register_rest_route('auto-sync/v1', '/search-logs', [
+        'methods' => 'GET',
+        'callback' => 'cas_api_get_search_logs',
+        'permission_callback' => 'cas_sync_key_authorized',
+        'args' => [
+            'after_id' => ['default' => 0, 'sanitize_callback' => 'absint'],
+            'limit' => ['default' => 200, 'sanitize_callback' => 'absint'],
+        ],
+    ]);
+
     register_rest_route('auto-sync/v1', '/vehicles', [
         'methods' => 'GET',
         'callback' => 'cas_api_get_all_vehicles',
@@ -686,6 +696,36 @@ add_action('rest_api_init', function () {
         }
     ]);
 });
+
+/**
+ * Incremental search-log feed for the central site's daily collector.
+ * Source IDs make retries safe; the central database deduplicates site + ID.
+ */
+function cas_api_get_search_logs(WP_REST_Request $request)
+{
+    global $wpdb;
+
+    $after_id = max(0, (int) $request->get_param('after_id'));
+    $limit = max(1, min(200, (int) $request->get_param('limit')));
+    $table = $wpdb->prefix . 'search_logs';
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT id, created_at, query, ip_address, user_agent, vin_result
+         FROM {$table} WHERE id > %d ORDER BY id ASC LIMIT %d",
+        $after_id,
+        $limit
+    ), ARRAY_A);
+
+    if ($rows === null || $wpdb->last_error !== '') {
+        return new WP_Error('search_logs_read_failed', 'Search logs could not be read.', ['status' => 500]);
+    }
+
+    return rest_ensure_response([
+        'success' => true,
+        'rows' => $rows,
+        'last_id' => $rows ? (int) end($rows)['id'] : $after_id,
+        'has_more' => count($rows) === $limit,
+    ]);
+}
 
 function cas_api_get_all_vehicles($request)
 {
