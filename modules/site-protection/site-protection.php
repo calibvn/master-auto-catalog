@@ -13,8 +13,12 @@ function mac_site_protection_state_version() {
  * The central agent forwards short-lived local observations to the selected
  * centre and applies only decisions explicitly queued by an administrator.
  */
-const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.2.0';
+const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.2.1';
 const MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK = 'mac_site_protection_central_sync';
+
+// Reporting thresholds shared by the agent and local crawler log writer.
+const MAC_CRAWLER_LOGS_DAILY_THRESHOLD = 100;
+const MAC_CRAWLER_LOG_SAMPLES_LIMIT = 15;
 
 add_filter('cron_schedules', function ($schedules) {
     $schedules['mac_five_minutes'] = ['interval' => 5 * MINUTE_IN_SECONDS, 'display' => 'Every five minutes'];
