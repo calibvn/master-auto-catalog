@@ -712,6 +712,52 @@ add_filter('upload_dir', function ($uploads) {
     return $uploads;
 });
 
+/**
+ * A product's modified date is public in three places: the sitemap lastmod,
+ * the order of the Yoast product sitemap (sorted by post_modified, so an
+ * edited product moves to its last page) and the page's
+ * article:modified_time and schema dateModified. A published product
+ * therefore keeps its creation date as its modified date.
+ */
+add_filter('wp_insert_post_data', function ($data, $postarr, $unsanitized = [], $update = false) {
+    if (!$update || ($data['post_type'] ?? '') !== 'product') return $data;
+    // Drafts have no GMT date yet; they get one when published.
+    if (empty($data['post_date']) || empty($data['post_date_gmt']) || $data['post_date_gmt'] === '0000-00-00 00:00:00') return $data;
+    $data['post_modified'] = $data['post_date'];
+    $data['post_modified_gmt'] = $data['post_date_gmt'];
+    return $data;
+}, 99, 4);
+
+// Products edited before this rule keep their old modified dates; align them once.
+add_action(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK, function () {
+    if (get_option('mac_site_protection_product_dates_v1') === '1') return;
+    global $wpdb;
+    $wpdb->query("UPDATE {$wpdb->posts} SET post_modified=post_date, post_modified_gmt=post_date_gmt
+        WHERE post_type='product' AND post_status='publish' AND post_date_gmt<>'0000-00-00 00:00:00'
+          AND (post_modified<>post_date OR post_modified_gmt<>post_date_gmt)");
+    if ($wpdb->last_error === '') update_option('mac_site_protection_product_dates_v1', '1', false);
+}, 6);
+
+add_filter('wpseo_sitemap_entry', function ($url, $type, $post) {
+    if ($type !== 'post' || !is_object($post) || get_query_var('sitemap') !== 'product') return $url;
+    // Only published products belong in the sitemap, whatever Yoast cached.
+    if (isset($post->post_status) && $post->post_status !== 'publish') return false;
+    if (is_array($url) && !empty($post->post_date_gmt) && $post->post_date_gmt !== '0000-00-00 00:00:00') $url['mod'] = $post->post_date_gmt;
+    return $url;
+}, 10, 3);
+
+add_filter('wpseo_schema_webpage', function ($data) {
+    if (is_singular('product') && is_array($data) && !empty($data['datePublished'])) $data['dateModified'] = $data['datePublished'];
+    return $data;
+});
+
+add_filter('wpseo_frontend_presenters', function ($presenters) {
+    if (!is_singular('product') || !is_array($presenters)) return $presenters;
+    return array_values(array_filter($presenters, static function ($presenter) {
+        return !is_a($presenter, 'Yoast\WP\SEO\Presenters\Open_Graph\Article_Modified_Time_Presenter');
+    }));
+});
+
 function mac_site_protection_is_site_search_request($wp = null) {
     if (array_key_exists('s', $_GET)) return true;
     if (is_object($wp) && isset($wp->query_vars) && array_key_exists('s', (array) $wp->query_vars)) return true;

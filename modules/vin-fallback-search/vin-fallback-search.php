@@ -801,18 +801,25 @@ class VINFallbackSearch
             ];
         }
 
+        // A redirect hides a product visitors could already open. Publishing a
+        // draft would add it to the sitemap under its draft title and slug
+        // (old "Product" drafts became /product-80/ that way), so a product
+        // that is not published stays a draft.
+        if ($hide_mode === 'redirect' && get_post_status($product_id) !== 'publish') {
+            delete_post_meta($product_id, '_mac_vin_hide_mode');
+
+            return [
+                'success' => true,
+                'message' => 'Vehicle is not published; kept in draft instead of redirect',
+                'product_id' => $product_id,
+                'status' => (string)get_post_status($product_id),
+                'hide_mode' => 'draft',
+                'url' => get_permalink($product_id),
+            ];
+        }
+
         if ($hide_mode === 'redirect') {
             update_post_meta($product_id, '_mac_vin_hide_mode', 'redirect');
-
-            if (get_post_status($product_id) !== 'publish') {
-                $updated = wp_update_post([
-                    'ID' => $product_id,
-                    'post_status' => 'publish',
-                ], true);
-                if (is_wp_error($updated)) {
-                    return $updated;
-                }
-            }
 
             return [
                 'success' => true,
