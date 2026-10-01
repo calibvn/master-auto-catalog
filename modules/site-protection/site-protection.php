@@ -632,6 +632,86 @@ add_action('init', function () {
     remove_action('template_redirect', 'rest_output_link_header', 11);
 });
 
+/**
+ * Some hosts list the uploads folders, which shows every new product photo
+ * with its upload time without touching PHP. The listing is closed with
+ * "Options -Indexes" in uploads/.htaccess. A host that forbids that directive
+ * answers 500 for every image, and nginx ignores .htaccess, so the result is
+ * checked with a request to the folder: on failure the file is restored and
+ * an empty index.html is placed in each folder instead.
+ */
+const MAC_SP_UPLOAD_LISTING_OPTION = 'mac_site_protection_upload_listing_v2';
+const MAC_SP_UPLOAD_HTACCESS_MARK = '# BEGIN MAC no-listing';
+
+/** @return string 'open', 'closed', 'error' or '' when the check failed. */
+function mac_site_protection_upload_listing_state($url) {
+    $response = wp_remote_get($url, ['timeout' => 15, 'redirection' => 0]);
+    if (is_wp_error($response)) return '';
+    $code = (int) wp_remote_retrieve_response_code($response);
+    if ($code >= 500) return 'error';
+    return stripos((string) wp_remote_retrieve_body($response), 'Index of') !== false ? 'open' : 'closed';
+}
+
+function mac_site_protection_hide_upload_listing($dir) {
+    $dir = untrailingslashit((string) $dir);
+    if ($dir === '' || !is_dir($dir) || file_exists($dir . '/index.html') || file_exists($dir . '/index.php')) return;
+    @file_put_contents($dir . '/index.html', '');
+}
+
+function mac_site_protection_add_upload_index_files($base) {
+    mac_site_protection_hide_upload_listing($base);
+    foreach ((array) glob($base . '/[0-9][0-9][0-9][0-9]', GLOB_ONLYDIR) as $year) {
+        mac_site_protection_hide_upload_listing($year);
+        foreach ((array) glob($year . '/[0-9][0-9]', GLOB_ONLYDIR) as $month) mac_site_protection_hide_upload_listing($month);
+    }
+}
+
+function mac_site_protection_close_upload_listing() {
+    if (get_option(MAC_SP_UPLOAD_LISTING_OPTION, '') !== '') return;
+    $uploads = wp_get_upload_dir();
+    $base = untrailingslashit((string) ($uploads['basedir'] ?? ''));
+    $url = trailingslashit((string) ($uploads['baseurl'] ?? ''));
+    if ($base === '' || !is_dir($base) || $url === '/') return;
+
+    $state = mac_site_protection_upload_listing_state($url);
+    if ($state === 'closed') {
+        update_option(MAC_SP_UPLOAD_LISTING_OPTION, 'server', false);
+        return;
+    }
+
+    if ($state === 'open') {
+        $file = $base . '/.htaccess';
+        $original = file_exists($file) ? (string) file_get_contents($file) : null;
+        if ($original !== null && strpos($original, MAC_SP_UPLOAD_HTACCESS_MARK) !== false) {
+            $written = true;
+        } else {
+            $prefix = $original === null || $original === '' ? '' : rtrim($original, "\n") . "\n\n";
+            $written = @file_put_contents($file, $prefix . MAC_SP_UPLOAD_HTACCESS_MARK . "\nOptions -Indexes\n# END MAC no-listing\n") !== false;
+        }
+        if ($written && mac_site_protection_upload_listing_state($url) === 'closed') {
+            update_option(MAC_SP_UPLOAD_LISTING_OPTION, 'htaccess', false);
+            return;
+        }
+        // 500 (directive forbidden) or still open (nginx): undo the change.
+        if ($written) {
+            if ($original === null) @unlink($file); else @file_put_contents($file, $original);
+        }
+    }
+
+    // A failed loopback request also ends here: index.html is harmless.
+    mac_site_protection_add_upload_index_files($base);
+    update_option(MAC_SP_UPLOAD_LISTING_OPTION, 'index', false);
+}
+add_action(MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK, 'mac_site_protection_close_upload_listing', 5);
+
+add_filter('upload_dir', function ($uploads) {
+    // With index.html protection a new month folder needs its own file.
+    if (empty($uploads['error']) && get_option(MAC_SP_UPLOAD_LISTING_OPTION, '') === 'index') {
+        mac_site_protection_hide_upload_listing($uploads['path'] ?? '');
+    }
+    return $uploads;
+});
+
 function mac_site_protection_is_site_search_request($wp = null) {
     if (array_key_exists('s', $_GET)) return true;
     if (is_object($wp) && isset($wp->query_vars) && array_key_exists('s', (array) $wp->query_vars)) return true;
