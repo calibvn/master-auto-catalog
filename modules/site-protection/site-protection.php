@@ -13,7 +13,22 @@ function mac_site_protection_state_version() {
  * The central agent forwards short-lived local observations to the selected
  * centre and applies only decisions explicitly queued by an administrator.
  */
-const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.2.1';
+const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.3.0';
+
+// Lowest values accepted from the centre. They only prevent a typo from
+// blocking every visitor; the real limits are chosen in the centre.
+const MAC_SP_MIN_SITE_RATE = 5;
+const MAC_SP_MIN_SITE_DAILY = 20;
+const MAC_SP_MIN_BOT_RATE = 3;
+const MAC_SP_MIN_PRODUCT_DAILY = 3;
+
+// Site search stays available to visitors, but it lists the catalogue, so it
+// has its own generous limits instead of being exempt from protection.
+const MAC_SP_SEARCH_WINDOW_LIMIT = 20;
+const MAC_SP_SEARCH_DAILY_LIMIT = 100;
+
+// Sitemaps and feeds are served only to verified search engines.
+const MAC_SP_SITEMAP_BLOCK_MINUTES = 30 * 24 * 60;
 const MAC_SITE_PROTECTION_CENTRAL_SYNC_HOOK = 'mac_site_protection_central_sync';
 
 // Reporting thresholds shared by the agent and local crawler log writer.
@@ -189,15 +204,16 @@ function mac_site_protection_central_apply_command(array $command) {
 
 function mac_site_protection_central_apply_settings(array $remote) {
     $settings = mac_site_protection_settings();
-    $settings['rate_limit_count'] = max(30, (int)($remote['site_rate_limit'] ?? $settings['rate_limit_count']));
-    $settings['xml_rate_limit_count'] = max(2, (int)($remote['xml_rate_limit'] ?? $settings['xml_rate_limit_count']));
-    $settings['site_daily_limit'] = max(100, (int)($remote['site_daily_limit'] ?? $settings['site_daily_limit']));
-    $settings['xml_daily_limit'] = max(5, (int)($remote['xml_daily_limit'] ?? $settings['xml_daily_limit']));
+    $settings['rate_limit_count'] = max(MAC_SP_MIN_SITE_RATE, (int)($remote['site_rate_limit'] ?? $settings['rate_limit_count']));
+    $settings['xml_rate_limit_count'] = max(1, (int)($remote['xml_rate_limit'] ?? $settings['xml_rate_limit_count']));
+    $settings['site_daily_limit'] = max(MAC_SP_MIN_SITE_DAILY, (int)($remote['site_daily_limit'] ?? $settings['site_daily_limit']));
+    $settings['xml_daily_limit'] = max(1, (int)($remote['xml_daily_limit'] ?? $settings['xml_daily_limit']));
     $settings['rate_limit_minutes'] = max(1, (int)($remote['window_minutes'] ?? $settings['rate_limit_minutes']));
     $settings['xml_rate_limit_minutes'] = $settings['rate_limit_minutes'];
     $settings['protection_mode'] = !empty($remote['auto_block_enabled']) ? 'enforce' : 'monitor';
-    $settings['unverified_bot_limit'] = max(10, (int) ($remote['unverified_bot_limit'] ?? $settings['unverified_bot_limit']));
-    $settings['seo_bot_limit'] = max(10, (int) ($remote['seo_bot_limit'] ?? $settings['seo_bot_limit']));
+    $settings['unverified_bot_limit'] = max(MAC_SP_MIN_BOT_RATE, (int) ($remote['unverified_bot_limit'] ?? $settings['unverified_bot_limit']));
+    $settings['seo_bot_limit'] = max(MAC_SP_MIN_BOT_RATE, (int) ($remote['seo_bot_limit'] ?? $settings['seo_bot_limit']));
+    $settings['product_daily_limit'] = max(MAC_SP_MIN_PRODUCT_DAILY, (int) ($remote['product_daily_limit'] ?? $settings['product_daily_limit']));
     update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
 }
 
@@ -354,10 +370,11 @@ function mac_site_protection_settings() {
         // Start new installations in observation mode. It records threshold
         // crossings but never returns 429 until an administrator enables it.
         'protection_mode' => 'monitor',
-        'rate_limit_count' => '200', 'rate_limit_minutes' => '10',
-        'xml_rate_limit_count' => '5', 'xml_rate_limit_minutes' => '10',
-        'site_daily_limit' => '1000', 'xml_daily_limit' => '20',
-        'unverified_bot_limit' => '60', 'seo_bot_limit' => '30',
+        'rate_limit_count' => '60', 'rate_limit_minutes' => '20',
+        'xml_rate_limit_count' => '2', 'xml_rate_limit_minutes' => '20',
+        'site_daily_limit' => '200', 'xml_daily_limit' => '10',
+        'unverified_bot_limit' => '30', 'seo_bot_limit' => '30',
+        'product_daily_limit' => '10',
         'ip_whitelist' => '', 'ua_whitelist' => '', 'telegram_topic_id' => '27659',
     ]);
 }
@@ -511,15 +528,24 @@ function mac_site_protection_block($ip, $reason, $minutes) {
     delete_transient(mac_site_protection_state_key('mac_sp_blocked', $ip));
     return true;
 }
+/**
+ * Search-engine family to verify by reverse DNS. Google's Ads, Merchant
+ * Center and Search Console crawlers do not contain "Googlebot" in the UA.
+ */
+function mac_site_protection_search_engine_key($ua) {
+    if (preg_match('/adsbot-google|storebot-google|google-inspectiontool|mediapartners-google|googleother/i', (string) $ua)) return 'googlebot';
+    return mac_sitemap_logs_bot_key($ua);
+}
+
 function mac_site_protection_cached_official_request($ua, $ip) {
-    $bot = mac_sitemap_logs_bot_key($ua);
-    if (!in_array($bot, ['googlebot','bingbot','yandexbot'], true) || $ip === '') return false;
+    $bot = mac_site_protection_search_engine_key($ua);
+    if (!in_array($bot, ['googlebot','bingbot','yandexbot','applebot'], true) || $ip === '') return false;
     return get_transient('mac_sp_verified_' . md5($bot . '|' . $ip)) === '1';
 }
 
 function mac_site_protection_is_official_request($ua, $ip = '') {
-    $bot = mac_sitemap_logs_bot_key($ua);
-    $suffixes = ['googlebot' => ['googlebot.com', 'google.com'], 'bingbot' => ['search.msn.com'], 'yandexbot' => ['yandex.ru', 'yandex.net']];
+    $bot = mac_site_protection_search_engine_key($ua);
+    $suffixes = ['googlebot' => ['googlebot.com', 'google.com'], 'bingbot' => ['search.msn.com'], 'yandexbot' => ['yandex.ru', 'yandex.net', 'yandex.com'], 'applebot' => ['applebot.apple.com']];
     if (!isset($suffixes[$bot]) || $ip === '') return false;
     $cache_key = 'mac_sp_verified_' . md5($bot . '|' . $ip);
     $cached = get_transient($cache_key);
@@ -573,10 +599,38 @@ function mac_site_protection_is_store_products_collection($path) {
 function mac_site_protection_is_public_catalog_api($path, $uri) {
     $route = (string) ($_GET['rest_route'] ?? $path);
     if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
+    // Private catalogue routes are refused to guests, but each attempt still
+    // counts towards the page limit so that a crawler probing them is blocked.
     return isset($_GET['wc-ajax'])
-        || preg_match('#^/wc/store(?:/v[0-9]+)?/products(?:/|$)#i', $route) === 1
-        || preg_match('#^/wp/v[0-9]+/search(?:/|$)#i', $route) === 1;
+        || mac_site_protection_is_private_rest_route($route);
 }
+
+/**
+ * Core and WooCommerce routes that list or describe products. Visitors never
+ * need them: the theme renders the catalogue on the server, the cart and the
+ * checkout use other wc/store routes, and the centre uses its own namespaces
+ * (auto-sync/v1, master-auto-catalog/v1) authenticated with X-API-Key.
+ */
+function mac_site_protection_is_private_rest_route($route) {
+    $route = '/' . ltrim((string) $route, '/');
+    return preg_match('#^/wp/v[0-9]+(?:/|$)#i', $route) === 1
+        || preg_match('#^/wc/store(?:/v[0-9]+)?/products(?:/|$)#i', $route) === 1;
+}
+
+add_filter('rest_pre_dispatch', function ($result, $server, $request) {
+    if ($result !== null || current_user_can('edit_posts')) return $result;
+    if (!mac_site_protection_is_private_rest_route($request->get_route())) return $result;
+    // Answer like a missing route so the response does not confirm that a
+    // product or a hidden draft exists.
+    return new WP_Error('rest_no_route', 'No route was found matching the URL and request method.', ['status' => 404]);
+}, 0, 3);
+
+add_action('init', function () {
+    if (is_user_logged_in()) return;
+    // These headers point every page to its /wp-json/wp/v2/... record.
+    remove_action('wp_head', 'rest_output_link_wp_head', 10);
+    remove_action('template_redirect', 'rest_output_link_header', 11);
+});
 
 function mac_site_protection_is_site_search_request($wp = null) {
     if (array_key_exists('s', $_GET)) return true;
@@ -586,6 +640,43 @@ function mac_site_protection_is_site_search_request($wp = null) {
     if ($query === '') return false;
     parse_str($query, $params);
     return array_key_exists('s', $params);
+}
+
+/**
+ * A search results page. Adding ?s= to any other address (a sitemap, a
+ * product, a REST route) must not change how that address is protected.
+ */
+function mac_site_protection_is_search_page($path, $wp = null) {
+    if (!mac_site_protection_is_site_search_request($wp)) return false;
+    return preg_match('#^/(?:page/[0-9]+/?)?$#i', (string) $path) === 1
+        || preg_match('#^/search(?:/|$)#i', (string) $path) === 1;
+}
+
+/**
+ * Sitemaps and feeds publish the full product list with dates. Visitors never
+ * open them, so only verified search engines receive them.
+ */
+function mac_site_protection_is_listing_feed($path) {
+    if (mac_sitemap_logs_is_xml_request($path)) return true;
+    if (isset($_GET['sitemap']) || isset($_GET['sitemap-stylesheet']) || isset($_GET['feed'])) return true;
+    return preg_match('#/feed(?:/(?:rss2?|atom|rdf|rss-http))?/?$#i', (string) $path) === 1;
+}
+
+/**
+ * Returns a stable key of the product addressed by this request, or ''.
+ */
+function mac_site_protection_product_key($path) {
+    if (preg_match('#^/product/([^/]+)/?$#i', (string) $path, $match)) return strtolower($match[1]);
+    if (!empty($_GET['product']) && is_string($_GET['product'])) return strtolower($_GET['product']);
+    // ?p=ID resolves any post; it is also the way to enumerate new IDs.
+    if (!empty($_GET['p']) && is_scalar($_GET['p'])) return 'id-' . (int) $_GET['p'];
+    return '';
+}
+
+function mac_site_protection_is_own_server($ip) {
+    if (in_array($ip, ['127.0.0.1', '::1'], true)) return true;
+    $server = (string) ($_SERVER['SERVER_ADDR'] ?? '');
+    return $server !== '' && hash_equals($server, (string) $ip);
 }
 
 function mac_site_protection_honeypot_path() {
@@ -685,11 +776,52 @@ function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, 
     ], ['%s', '%s', '%s', '%d', '%d', '%s', '%s', '%s']);
 }
 
-function mac_site_protection_reject($retry_after, $message = 'Too many requests. Please try again later.') {
+/**
+ * Counts different products opened by one subject during the past 24 hours.
+ * Reloading the same product is not counted twice.
+ */
+function mac_site_protection_count_daily_products($subject, $product_key) {
+    global $wpdb;
+    $table = $wpdb->prefix . 'site_protection_rate_buckets';
+    $slot = intdiv(time(), 15 * MINUTE_IN_SECONDS) * 15 * MINUTE_IN_SECONDS;
+    $rule_key = 'pv_' . substr(md5((string) $product_key), 0, 16);
+    $inserted = $wpdb->query($wpdb->prepare("INSERT INTO {$table} (subject,rule_key,bucket_start,hits) VALUES (%s,%s,%s,1) ON DUPLICATE KEY UPDATE hits=hits+1", $subject, $rule_key, gmdate('Y-m-d H:i:00', $slot)));
+    if ($inserted === false) {
+        error_log('Site protection product counter failed: ' . $wpdb->last_error);
+        return 0;
+    }
+    return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT rule_key) FROM {$table} WHERE subject=%s AND rule_key LIKE %s AND bucket_start >= %s", $subject, $wpdb->esc_like('pv_') . '%', gmdate('Y-m-d H:i:00', $slot - 95 * 15 * MINUTE_IN_SECONDS)));
+}
+
+/**
+ * Too many different products in a day: 1 day, then 7 days, then 30 days.
+ * Never permanent, because one mobile-carrier IPv4 is shared by many people.
+ */
+function mac_site_protection_handle_product_threshold($subject, $count, $limit, $ua, $mode) {
+    if ($mode !== 'enforce') {
+        $event_key = mac_site_protection_state_key('mac_sp_product_monitor', $subject);
+        if (get_transient($event_key) === false) {
+            set_transient($event_key, '1', HOUR_IN_SECONDS);
+            mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'monitor', $ua);
+        }
+        return;
+    }
+    $level = mac_site_protection_register_incident($subject, 'product_daily');
+    $minutes = [1 => DAY_IN_SECONDS, 2 => 7 * DAY_IN_SECONDS][$level] ?? 30 * DAY_IN_SECONDS;
+    $minutes = (int) ($minutes / MINUTE_IN_SECONDS);
+    if (!mac_site_protection_block($subject, 'Product view limit, level ' . $level, $minutes)) {
+        mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'error', $ua);
+        mac_site_protection_reject(60);
+    }
+    mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'block', $ua);
+    mac_site_protection_reject($minutes * MINUTE_IN_SECONDS, 'Access temporarily restricted. Please try again later.');
+}
+
+function mac_site_protection_reject($retry_after, $message = 'Too many requests. Please try again later.', $status = 429) {
     mac_sitemap_logs_begin_request();
     mac_crawler_logs_begin_request();
     nocache_headers();
-    status_header(429);
+    status_header((int) $status);
     header('Content-Type: text/plain; charset=utf-8');
     header('Retry-After: ' . max(60, (int) $retry_after));
     echo esc_html($message);
@@ -722,28 +854,69 @@ function mac_site_protection_enforce_v2($wp = null) {
     if (is_admin() || (is_user_logged_in() && current_user_can('manage_options'))) return;
     $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
     if (!in_array($method, ['GET', 'HEAD'], true)) return;
-    $requestPath = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
-    if (mac_site_protection_is_site_search_request($wp) && !mac_site_protection_is_public_catalog_api($requestPath, (string) ($_SERVER['REQUEST_URI'] ?? ''))) return;
 
     $ip = mac_site_protection_client_ip();
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-    if ($ip === '' || mac_site_protection_whitelisted($ip, $ua)) return;
+    // Cache preload and loopback requests come from the site's own server.
+    if ($ip === '' || mac_site_protection_is_own_server($ip) || mac_site_protection_whitelisted($ip, $ua)) return;
 
     // Do not run a database UPDATE on every request just to expire old rows.
     if (!get_transient('mac_sp_expire_checked')) {
         mac_site_protection_expire_blocks();
         set_transient('mac_sp_expire_checked', '1', 5 * MINUTE_IN_SECONDS);
     }
+    // An active block covers every address, including search, sitemaps and feeds.
     if (mac_site_protection_blocked($ip)) {
         mac_site_protection_record_block_hit($ip);
         mac_site_protection_reject(3600, 'Access temporarily restricted. Please try again later.');
     }
 
     $s = mac_site_protection_settings();
+    $mode = $s['protection_mode'];
     $path = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
-    $is_xml = mac_sitemap_logs_is_xml_request($path);
     $class = mac_site_protection_traffic_class($ua, $ip);
     if ($class === 'official') return;
+    $subject = mac_site_protection_subject($ip, $class);
+
+    if (untrailingslashit($path) === untrailingslashit(mac_site_protection_honeypot_path())) {
+        $subject = mac_site_protection_subject($ip, 'honeypot');
+        mac_site_protection_log_event($subject, 'honeypot', 1, 0, $mode === 'enforce' ? 'block' : 'monitor', $ua);
+        if ($mode === 'enforce') {
+            $minutes = 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS;
+            mac_site_protection_block($subject, 'Service URL access', $minutes);
+            nocache_headers(); status_header(403); header('Content-Type: text/plain; charset=utf-8'); echo 'Access denied.'; exit;
+        }
+        return;
+    }
+
+    if (mac_site_protection_is_listing_feed($path)) {
+        if ($mode !== 'enforce') {
+            $event_key = mac_site_protection_state_key('mac_sp_feed_monitor', $subject);
+            if (get_transient($event_key) === false) {
+                set_transient($event_key, '1', HOUR_IN_SECONDS);
+                mac_site_protection_log_event($subject, 'sitemap_forbidden', 1, 0, 'monitor', $ua);
+            }
+            return;
+        }
+        // SEO services are refused without a block: they announce themselves
+        // honestly and are not the crawlers that copy the catalogue.
+        if ($class !== 'seo') {
+            mac_site_protection_block($subject, 'Sitemap or feed access', MAC_SP_SITEMAP_BLOCK_MINUTES);
+            mac_site_protection_log_event($subject, 'sitemap_forbidden', 1, 0, 'block', $ua);
+        }
+        mac_site_protection_reject(DAY_IN_SECONDS, 'Access denied.', 403);
+    }
+
+    if (mac_site_protection_is_search_page($path, $wp)) {
+        $daily_count = mac_site_protection_increment_daily_window($subject, 'search_daily');
+        if ($daily_count > MAC_SP_SEARCH_DAILY_LIMIT) mac_site_protection_handle_daily_threshold($subject, 'search_daily', $daily_count, MAC_SP_SEARCH_DAILY_LIMIT, $ua, $mode);
+        $minutes = max(1, (int) $s['rate_limit_minutes']);
+        $count = mac_site_protection_increment_window($subject, 'search_rate', $minutes, MAC_SP_SEARCH_WINDOW_LIMIT + 1);
+        if ($count > MAC_SP_SEARCH_WINDOW_LIMIT) mac_site_protection_handle_threshold($subject, 'search_rate', $count, MAC_SP_SEARCH_WINDOW_LIMIT, $minutes, $ua, $mode);
+        return;
+    }
+
+    $daily_limit = max(MAC_SP_MIN_SITE_DAILY, (int) ($s['site_daily_limit'] ?? 200));
 
     if (mac_site_protection_is_store_products_collection($path)) {
         $requestedPageSize = isset($_GET['per_page']) ? (int) $_GET['per_page'] : 10;
@@ -756,71 +929,35 @@ function mac_site_protection_enforce_v2($wp = null) {
         }
         $minutes = 10;
         $limit = 12;
-        $subject = mac_site_protection_subject($ip, $class);
-        $daily_limit = max(100, (int) ($s['site_daily_limit'] ?? 1000));
         $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
-        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
+        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $mode);
         $count = mac_site_protection_increment_window($subject, 'catalog_api_rate', $minutes, $limit + 1);
-        if ($count > $limit) mac_site_protection_handle_threshold($subject, 'catalog_api_rate', $count, $limit, $minutes, $ua, $s['protection_mode']);
+        if ($count > $limit) mac_site_protection_handle_threshold($subject, 'catalog_api_rate', $count, $limit, $minutes, $ua, $mode);
         return;
     }
 
-    if (untrailingslashit($path) === untrailingslashit(mac_site_protection_honeypot_path())) {
-        $subject = mac_site_protection_subject($ip, 'honeypot');
-        mac_site_protection_log_event($subject, 'honeypot', 1, 0, $s['protection_mode'] === 'enforce' ? 'block' : 'monitor', $ua);
-        if ($s['protection_mode'] === 'enforce') {
-            $minutes = 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS;
-            mac_site_protection_block($subject, 'Service URL access', $minutes);
-            nocache_headers(); status_header(403); header('Content-Type: text/plain; charset=utf-8'); echo 'Access denied.'; exit;
-        }
-        return;
+    if ($s['rate_limit_enabled'] !== '1' || !mac_site_protection_is_meaningful_request($path)) return;
+
+    $product_key = mac_site_protection_product_key($path);
+    if ($product_key !== '') {
+        $product_limit = max(MAC_SP_MIN_PRODUCT_DAILY, (int) ($s['product_daily_limit'] ?? 10));
+        $products = mac_site_protection_count_daily_products($subject, $product_key);
+        if ($products > $product_limit) mac_site_protection_handle_product_threshold($subject, $products, $product_limit, $ua, $mode);
     }
 
-    if ($is_xml && $s['xml_rate_limit_enabled'] === '1') {
-        $minutes = max(1, (int) $s['xml_rate_limit_minutes']);
-        $limit = max(2, (int) $s['xml_rate_limit_count']);
-        $rule_key = 'xml_rate_auto';
-        $subject = mac_site_protection_subject($ip, $class);
-        $daily_limit = max(5, (int) ($s['xml_daily_limit'] ?? 20));
-        $daily_count = mac_site_protection_increment_daily_window($subject, 'xml_daily_auto');
-        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'xml_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
-        $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
-        if ($count > $limit) {
-            mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $s['protection_mode']);
-            if ($s['protection_mode'] !== 'enforce') return;
-        }
-        return;
-    }
-
-    if ($s['rate_limit_enabled'] !== '1' || $is_xml || !mac_site_protection_is_meaningful_request($path)) return;
     $minutes = max(1, (int) $s['rate_limit_minutes']);
-    $limit = max(30, (int) $s['rate_limit_count']);
-    if ($class === 'unverified_bot') $limit = max(10, (int) ($s['unverified_bot_limit'] ?? $limit));
-    if ($class === 'seo') $limit = max(10, (int) ($s['seo_bot_limit'] ?? $limit));
-    if ($class === 'suspicious_browser') $limit = min($limit, max(10, (int) ($s['unverified_bot_limit'] ?? $limit)));
+    $limit = max(MAC_SP_MIN_SITE_RATE, (int) $s['rate_limit_count']);
+    if ($class === 'unverified_bot') $limit = max(MAC_SP_MIN_BOT_RATE, (int) ($s['unverified_bot_limit'] ?? $limit));
+    if ($class === 'seo') $limit = max(MAC_SP_MIN_BOT_RATE, (int) ($s['seo_bot_limit'] ?? $limit));
+    if ($class === 'suspicious_browser') $limit = min($limit, max(MAC_SP_MIN_BOT_RATE, (int) ($s['unverified_bot_limit'] ?? $limit)));
     $rule_key = 'site_rate_auto';
-    $subject = mac_site_protection_subject($ip, $class);
-    $daily_limit = max(100, (int) ($s['site_daily_limit'] ?? 1000));
     $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
-    if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $s['protection_mode']);
+    if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $mode);
     $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
     if ($count <= $limit) return;
-    mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $s['protection_mode']);
+    mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $mode);
 }
 add_action('parse_request', 'mac_site_protection_enforce_v2', -1);
-
-add_action('admin_post_mac_site_protection_save', function () {
-    if (!current_user_can('manage_options')) wp_die('Access denied.');
-    check_admin_referer('mac_site_protection_save');
-    update_option(MAC_SITE_PROTECTION_OPTION, [
-        'xml_rate_limit_enabled' => isset($_POST['xml_rate_limit_enabled']) ? '1' : '0', 'rate_limit_enabled' => isset($_POST['rate_limit_enabled']) ? '1' : '0',
-        'protection_mode' => ($_POST['protection_mode'] ?? 'monitor') === 'enforce' ? 'enforce' : 'monitor',
-        'rate_limit_count' => max(30, (int) ($_POST['rate_limit_count'] ?? 300)), 'rate_limit_minutes' => max(1, (int) ($_POST['rate_limit_minutes'] ?? 10)), 'xml_rate_limit_count' => max(2, (int) ($_POST['xml_rate_limit_count'] ?? 30)), 'xml_rate_limit_minutes' => max(1, (int) ($_POST['xml_rate_limit_minutes'] ?? 10)),
-        'ip_whitelist' => sanitize_textarea_field(wp_unslash($_POST['ip_whitelist'] ?? '')), 'ua_whitelist' => sanitize_textarea_field(wp_unslash($_POST['ua_whitelist'] ?? '')),
-        'telegram_topic_id' => preg_replace('/[^0-9]/', '', (string) ($_POST['telegram_topic_id'] ?? '27659')),
-    ], false);
-    wp_safe_redirect(admin_url('admin.php?page=mac-site-protection&saved=1')); exit;
-});
 
 function mac_site_protection_page_v2() {
     if (!current_user_can('manage_options')) return;
@@ -846,7 +983,7 @@ function mac_site_protection_page_v2() {
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p><?php if ($syncStatus): ?><p><strong>Последняя синхронизация:</strong> <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><br><strong>Результат:</strong> <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'Неизвестно'); ?><?php if (!empty($syncStatus['http_code'])): ?> (HTTP <?php echo (int) $syncStatus['http_code']; ?>)<?php endif; ?><?php if (!empty($syncStatus['received_commands'])): ?><br><strong>Команды от центра:</strong> <?php echo esc_html(implode(', ', array_map('intval', (array) $syncStatus['received_commands']))); ?><?php endif; ?><?php if (!empty($syncStatus['command_results'])): ?><br><strong>Применение:</strong> <?php foreach ((array) $syncStatus['command_results'] as $result): ?><?php echo esc_html('#' . (int) ($result['id'] ?? 0) . ': ' . (!empty($result['ok']) ? 'успешно' : 'ошибка') . (!empty($result['message']) ? ' — ' . (string) $result['message'] : '') . ' '); ?><?php endforeach; ?><?php endif; ?><?php if (!empty($syncStatus['ack_state']) && $syncStatus['ack_state'] !== 'not_required'): ?><br><strong>Подтверждение центру:</strong> <?php echo esc_html($syncStatus['ack_state'] === 'confirmed' ? 'отправлено' : (string) $syncStatus['ack_state']); ?><?php endif; ?><?php if (!empty($syncStatus['error'])): ?><br><strong>Ошибка:</strong> <?php echo esc_html((string) $syncStatus['error']); ?><?php endif; ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form></section>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>WhiteList IP</h2></div><p><?php echo $settings['ip_whitelist'] !== '' ? nl2br(esc_html($settings['ip_whitelist'])) : 'Пусто'; ?></p></section>
         <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th><th>Отклонено</th><th>Последняя попытка</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo number_format_i18n((int) ($block['blocked_hits'] ?? 0)); ?></td><td><?php echo esc_html($block['last_blocked_at'] ?: '—'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
-        <section class="mac-protection-panel mac-protection-guide"><div class="mac-panel-head"><h2>Как работает защита</h2></div><p>Сайт исполняет правила из центра и сам не создаёт постоянных ручных решений. При блокировке он отвечает <code>429 Too Many Requests</code>; счётчики в таблице показывают только новые отклонённые запросы после установки этой версии.</p><h3>Причины блокировок</h3><ul><li><strong>Массовая блокировка по отчёту защиты</strong> или <strong>Ручное решение из центра</strong> — решение администратора из центрального сайта. Срок указан в столбце «До».</li><li><strong>Превышен лимит запросов</strong> — интенсивные обращения к обычным страницам. Лимит и срок задаются в центре; повторные превышения усиливают блокировку: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</li><li><strong>Превышен лимит XML</strong> — слишком частые запросы к XML-картам сайта. Для него действует отдельный, более низкий лимит из центра.</li><li><strong>Honeypot crawler trap</strong> — запрос к уникальному для этого сайта скрытому пути, запрещённому в robots.txt. Это признак парсера, игнорирующего robots.txt и скрытые ссылки; срок такой блокировки — 7 дней.</li></ul><h3>Схема работы</h3><ol><li>Сначала проверяются WhiteList и уже активные блокировки.</li><li>Поисковые запросы сайта не учитываются и не ограничиваются.</li><li>Официальные Google, Bing и Яндекс не ограничиваются после проверки происхождения.</li><li>Остальные запросы проходят лимиты страниц и XML-карт; срабатывания и агрегированная статистика отправляются в центр.</li><li>Центр выдаёт ручные решения и лимиты, а сайт проверяет очередь примерно раз в минуту при работающем WP-Cron.</li></ol></section>
+        <section class="mac-protection-panel mac-protection-guide"><div class="mac-panel-head"><h2>Как работает защита</h2></div><p>Сайт исполняет правила из центра и сам не создаёт постоянных ручных решений. При блокировке он отвечает <code>429 Too Many Requests</code>; счётчики в таблице показывают только новые отклонённые запросы после установки этой версии.</p><h3>Причины блокировок</h3><ul><li><strong>Массовая блокировка по отчёту защиты</strong>, <strong>Ручное решение из центра</strong> или <strong>Автоблок с другого сайта сети</strong> — решение пришло из центрального сайта. Срок указан в столбце «До».</li><li><strong>Intensive access</strong> — превышен лимит страниц за окно. Повторные превышения усиливают блокировку: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</li><li><strong>Daily request limit</strong> — превышен суточный лимит страниц или поиска; блокировка на 24 часа.</li><li><strong>Product view limit</strong> — за сутки открыто больше разных товаров, чем разрешено в центре. Блокировка 1 день → 7 дней → 30 дней, навсегда — никогда (один мобильный IP бывает общим у многих людей).</li><li><strong>Sitemap or feed access</strong> — запрос XML-карты сайта или RSS не от проверенного Google, Bing, Яндекса или Apple. Посетители их не открывают; блокировка на 30 дней.</li><li><strong>Service URL access</strong> — запрос к скрытой ссылке-ловушке, запрещённой в robots.txt; блокировка на 7 дней.</li></ul><h3>Схема работы</h3><ol><li>Сначала проверяются WhiteList, запросы самого сервера (preload кэша) и активные блокировки — блокировка действует на все адреса, включая поиск.</li><li>Официальные Google (включая AdsBot, Merchant Center и Search Console), Bing, Яндекс и Apple не ограничиваются после проверки по DNS.</li><li>Карты сайта и RSS отдаются только им; остальным — 403.</li><li>Поиск по сайту ограничен отдельно: <?php echo (int) MAC_SP_SEARCH_WINDOW_LIMIT; ?> за окно и <?php echo (int) MAC_SP_SEARCH_DAILY_LIMIT; ?> за сутки. Параметр <code>?s=</code> на других адресах защиту не отключает.</li><li>REST API WordPress со списками товаров (<code>/wp-json/wp/v2/*</code>, <code>/wp-json/wc/store/*/products</code>) закрыт для гостей; корзина, оформление заказа, вебхуки оплат и API центра работают как прежде.</li><li>Остальные запросы проходят лимиты страниц и товаров; срабатывания отправляются в центр, а центр распространяет автоблоки на все сайты сети.</li></ol></section>
     </div>
     <?php
 }
@@ -858,22 +995,6 @@ add_action('admin_post_mac_site_protection_sync_now', function () {
     check_admin_referer('mac_site_protection_sync_now');
     mac_site_protection_central_sync();
     wp_safe_redirect(admin_url('admin.php?page=mac-site-protection&sync_now=1'));
-    exit;
-});
-
-add_action('admin_post_mac_site_protection_reset', function () {
-    if (!current_user_can('manage_options')) wp_die('Access denied.');
-    check_admin_referer('mac_site_protection_reset');
-    global $wpdb;
-    foreach (['site_protection_blocks', 'site_protection_incidents', 'site_protection_events', 'crawler_log_samples', 'crawler_logs'] as $suffix) {
-        $wpdb->query("DELETE FROM {$wpdb->prefix}{$suffix}");
-    }
-    update_option(MAC_SITE_PROTECTION_STATE_VERSION_OPTION, mac_site_protection_state_version() + 1, false);
-    $settings = mac_site_protection_settings();
-    $settings['protection_mode'] = 'monitor';
-    update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
-    set_transient('mac_site_protection_reset_result_' . get_current_user_id(), '1', MINUTE_IN_SECONDS);
-    wp_safe_redirect(admin_url('admin.php?page=mac-site-protection&reset=1'));
     exit;
 });
 
