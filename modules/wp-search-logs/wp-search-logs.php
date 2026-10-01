@@ -58,150 +58,17 @@ function wp_search_logs_update_vin_result($result, $vin)
 }
 add_action('mac_vin_fallback_search_result', 'wp_search_logs_update_vin_result', 10, 2);
 
-const MAC_SEARCH_LOGS_TELEGRAM_OPTION = 'mac_search_logs_telegram_settings';
-const MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK = 'mac_search_logs_telegram_daily';
-const MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK = 'mac_search_logs_telegram_weekly';
-
-function mac_search_logs_telegram_settings()
-{
-    return wp_parse_args((array) get_option(MAC_SEARCH_LOGS_TELEGRAM_OPTION, []), [
-        'bot_token' => '',
-        'chat_id' => '-1003180903998',
-        'topic_id' => '264801',
-        'daily_enabled' => '1',
-        'weekly_enabled' => '1',
-    ]);
-}
-
-function mac_search_logs_telegram_schedule()
-{
-    $now = new DateTimeImmutable('now', wp_timezone());
-
-    if (!wp_next_scheduled(MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK)) {
-        wp_schedule_event($now->modify('tomorrow')->setTime(0, 5)->getTimestamp(), 'daily', MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK);
-    }
-
-    if (!wp_next_scheduled(MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK)) {
-        $next_monday = $now->modify('monday this week')->setTime(0, 10);
-        if ($next_monday <= $now) {
-            $next_monday = $next_monday->modify('+1 week');
-        }
-
-        wp_schedule_event($next_monday->getTimestamp(), 'weekly', MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK);
-    }
-}
-add_action('init', 'mac_search_logs_telegram_schedule');
-
-function mac_search_logs_telegram_send(DateTimeInterface $start, DateTimeInterface $end)
-{
-    global $wpdb;
-
-    $settings = mac_search_logs_telegram_settings();
-    if ($settings['bot_token'] === '' || $settings['chat_id'] === '') {
-        return ['status' => 'error', 'message' => 'Заполните Token и Chat ID Telegram.'];
-    }
-
-    $table = $wpdb->prefix . 'search_logs';
-    $vin_condition = wp_search_logs_vin_sql_condition();
-    $rows = $wpdb->get_results($wpdb->prepare(
-        "SELECT query, COUNT(*) AS count,
-                SUBSTRING_INDEX(GROUP_CONCAT(NULLIF(vin_result, '') ORDER BY id DESC SEPARATOR ','), ',', 1) AS vin_result
-         FROM {$table}
-         WHERE {$vin_condition} AND created_at >= %s AND created_at < %s
-         GROUP BY query
-         ORDER BY count DESC, query ASC",
-        $start->format('Y-m-d H:i:s'),
-        $end->format('Y-m-d H:i:s')
-    ), ARRAY_A);
-
-    if (!$rows) {
-        return ['status' => 'empty'];
-    }
-
-    $host = wp_parse_url(home_url(), PHP_URL_HOST) ?: home_url();
-    $lines = [$host];
-    foreach ($rows as $row) {
-        $lines[] = $row['query'] . ' - ' . (int) $row['count'] . ' - ' . wp_search_logs_vin_result_label((string) ($row['vin_result'] ?? ''));
-    }
-
-    $body = [
-        'chat_id' => $settings['chat_id'],
-        'message_thread_id' => (int) $settings['topic_id'],
-        'parse_mode' => 'HTML',
-        'disable_web_page_preview' => 'true',
-        'text' => implode("\n", $lines),
-    ];
-
-    if ($body['message_thread_id'] <= 0) {
-        unset($body['message_thread_id']);
-    }
-
-    $response = wp_remote_post('https://api.telegram.org/bot' . rawurlencode($settings['bot_token']) . '/sendMessage', [
-        'timeout' => 20,
-        'body' => $body,
-    ]);
-
-    if (is_wp_error($response)) {
-        return ['status' => 'error', 'message' => $response->get_error_message()];
-    }
-
-    $code = (int) wp_remote_retrieve_response_code($response);
-    if ($code < 200 || $code >= 300) {
-        return ['status' => 'error', 'message' => 'Telegram API HTTP ' . $code . ': ' . wp_remote_retrieve_body($response)];
-    }
-
-    return ['status' => 'sent'];
-}
-
-add_action(MAC_SEARCH_LOGS_TELEGRAM_DAILY_HOOK, function () {
-    $settings = mac_search_logs_telegram_settings();
-    if ($settings['daily_enabled'] === '1') {
-        $end = new DateTimeImmutable('today', wp_timezone());
-        mac_search_logs_telegram_send($end->modify('-1 day'), $end);
-    }
-});
-
-add_action(MAC_SEARCH_LOGS_TELEGRAM_WEEKLY_HOOK, function () {
-    $settings = mac_search_logs_telegram_settings();
-    if ($settings['weekly_enabled'] === '1') {
-        $today = new DateTimeImmutable('today', wp_timezone());
-        $end = $today->modify('-' . ((int) $today->format('N') - 1) . ' days');
-        mac_search_logs_telegram_send($end->modify('-7 days'), $end);
-    }
-});
-
-add_action('admin_post_mac_search_logs_save_telegram', function () {
-    if (!current_user_can('manage_options')) {
-        wp_die('Access denied.');
-    }
-
-    check_admin_referer('mac_search_logs_save_telegram');
-    $current = mac_search_logs_telegram_settings();
-    $token = trim((string) wp_unslash($_POST['bot_token'] ?? ''));
-
-    update_option(MAC_SEARCH_LOGS_TELEGRAM_OPTION, [
-        'bot_token' => $token !== '' ? sanitize_text_field($token) : $current['bot_token'],
-        'chat_id' => preg_replace('/[^0-9-]/', '', (string) wp_unslash($_POST['chat_id'] ?? '')),
-        'topic_id' => preg_replace('/[^0-9]/', '', (string) wp_unslash($_POST['topic_id'] ?? '')),
-        'daily_enabled' => isset($_POST['daily_enabled']) ? '1' : '0',
-        'weekly_enabled' => isset($_POST['weekly_enabled']) ? '1' : '0',
-    ], false);
-
-    wp_safe_redirect(add_query_arg(['page' => 'wp-search-logs', 'telegram_saved' => '1'], admin_url('admin.php')));
-    exit;
-});
-
-add_action('admin_post_mac_search_logs_send_telegram', function () {
-    if (!current_user_can('manage_options')) {
-        wp_die('Access denied.');
-    }
-
-    check_admin_referer('mac_search_logs_send_telegram');
-    $start = new DateTimeImmutable('today', wp_timezone());
-    set_transient('mac_search_logs_telegram_result_' . get_current_user_id(), mac_search_logs_telegram_send($start, new DateTimeImmutable('now', wp_timezone())), MINUTE_IN_SECONDS);
-
-    wp_safe_redirect(add_query_arg('page', 'wp-search-logs', admin_url('admin.php')));
-    exit;
+/**
+ * VIN search reports are sent by the central site after it collects the logs
+ * of every site. Remove the schedule and settings of the former per-site
+ * Telegram reports once.
+ */
+add_action('init', function () {
+    if (get_option('mac_search_logs_telegram_removed') === '1') return;
+    wp_clear_scheduled_hook('mac_search_logs_telegram_daily');
+    wp_clear_scheduled_hook('mac_search_logs_telegram_weekly');
+    delete_option('mac_search_logs_telegram_settings');
+    update_option('mac_search_logs_telegram_removed', '1', false);
 });
 
 add_action('admin_post_mac_logs_cleanup', function () {
@@ -487,66 +354,17 @@ function wp_search_logs_page()
     );
 
     $base_url = admin_url('admin.php?page=wp-search-logs');
-    $telegram_settings = mac_search_logs_telegram_settings();
-    $telegram_result = get_transient('mac_search_logs_telegram_result_' . get_current_user_id());
-    delete_transient('mac_search_logs_telegram_result_' . get_current_user_id());
     $cleanup_result = get_transient('mac_logs_cleanup_result_' . get_current_user_id());
     delete_transient('mac_logs_cleanup_result_' . get_current_user_id());
 ?>
     <div class="wrap">
         <h1>Search Logs</h1>
+        <p class="description">Отчёты о VIN-поисках в Telegram отправляет центральный сайт после ежедневного сбора логов со всех сайтов.</p>
 
-        <?php if (isset($_GET['telegram_saved'])): ?>
-            <div class="notice notice-success is-dismissible"><p>Настройки Telegram сохранены.</p></div>
-        <?php endif; ?>
-        <?php if ($telegram_result && $telegram_result['status'] === 'sent'): ?>
-            <div class="notice notice-success is-dismissible"><p>Отчёт отправлен.</p></div>
-        <?php elseif ($telegram_result && $telegram_result['status'] === 'empty'): ?>
-            <div class="notice notice-info"><p>За сегодня нет VIN-поисков. Отчёт не отправлен.</p></div>
-        <?php elseif ($telegram_result && $telegram_result['status'] === 'error'): ?>
-            <div class="notice notice-error"><p><?php echo esc_html($telegram_result['message']); ?></p></div>
-        <?php endif; ?>
         <?php if ($cleanup_result): ?>
             <div class="notice notice-success is-dismissible"><p>Удалено записей: <?php echo number_format_i18n((int) $cleanup_result['deleted']); ?>.</p></div>
         <?php endif; ?>
 
-        <div class="postbox" style="margin: 20px 0; background: white; border: 1px solid #ccd0d4; border-radius: 4px;">
-            <div class="inside" style="padding: 15px;">
-                <h2 style="margin-top: 0;">Telegram отчёты</h2>
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                    <?php wp_nonce_field('mac_search_logs_save_telegram'); ?>
-                    <input type="hidden" name="action" value="mac_search_logs_save_telegram">
-                    <table class="form-table" role="presentation">
-                        <tr>
-                            <th scope="row"><label for="search-logs-tg-token">Token бота</label></th>
-                            <td><input id="search-logs-tg-token" type="password" name="bot_token" class="regular-text" placeholder="<?php echo $telegram_settings['bot_token'] !== '' ? 'Настроен - оставьте пустым, чтобы не менять' : ''; ?>" autocomplete="new-password"></td>
-                        </tr>
-                        <tr>
-                            <th scope="row"><label for="search-logs-tg-chat">Chat ID</label></th>
-                            <td><input id="search-logs-tg-chat" type="text" name="chat_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['chat_id']); ?>"></td>
-                        </tr>
-                        <tr>
-                            <th scope="row"><label for="search-logs-tg-topic">Topic ID</label></th>
-                            <td><input id="search-logs-tg-topic" type="text" name="topic_id" class="regular-text" value="<?php echo esc_attr($telegram_settings['topic_id']); ?>"></td>
-                        </tr>
-                        <tr>
-                            <th scope="row">Автоматические отчёты</th>
-                            <td>
-                                <label><input type="checkbox" name="daily_enabled" value="1" <?php checked($telegram_settings['daily_enabled'], '1'); ?>> Каждый день</label><br>
-                                <label><input type="checkbox" name="weekly_enabled" value="1" <?php checked($telegram_settings['weekly_enabled'], '1'); ?>> Раз в неделю</label>
-                            </td>
-                        </tr>
-                    </table>
-                    <?php submit_button('Сохранить настройки Telegram'); ?>
-                </form>
-
-                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                    <?php wp_nonce_field('mac_search_logs_send_telegram'); ?>
-                    <input type="hidden" name="action" value="mac_search_logs_send_telegram">
-                    <?php submit_button('Отправить отчёт за сегодня', 'secondary'); ?>
-                </form>
-            </div>
-        </div>
 
         <!-- Статистика -->
         <div class="search-stats" style="margin: 20px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
