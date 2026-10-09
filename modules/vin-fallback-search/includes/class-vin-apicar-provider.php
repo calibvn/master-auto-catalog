@@ -21,7 +21,7 @@ class VIN_Apicar_Provider implements VIN_Provider_Interface
 
         $url = add_query_arg(['vin' => $vin], 'https://api.apicar.store/api/cars/vin/all');
 
-        $response = wp_remote_get($url, [
+        $response = mac_vin_provider_request('GET', $url, [
             'timeout'     => 20,
             'redirection' => 0,
             'headers'     => [

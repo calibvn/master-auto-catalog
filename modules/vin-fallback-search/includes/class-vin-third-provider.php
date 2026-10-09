@@ -36,7 +36,7 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
     {
         $exists_url = "https://auctionsapi.com/api/local-exists/{$vin}";
 
-        $response = wp_remote_get($exists_url, [
+        $response = mac_vin_provider_request('GET', $exists_url, [
             'timeout'     => 20,
             'redirection' => 0,
             'headers'     => [
@@ -102,7 +102,7 @@ class VIN_Third_API_Provider implements VIN_Provider_Interface
     {
         $report_url = "https://auctionsapi.com/api/local-report/{$vin}";
 
-        $response = wp_remote_get($report_url, [
+        $response = mac_vin_provider_request('GET', $report_url, [
             'timeout'     => 20,
             'redirection' => 0,
             'headers'     => [

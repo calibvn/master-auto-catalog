@@ -129,7 +129,7 @@ class VINFallbackSearch
                 'tag' => 'Apicar',
                 'enabled_field' => 'apicar_enabled',
                 'fields' => [
-                    'api_key' => ['label' => 'API РєР»СЋС‡ Apicar.store', 'type' => 'password'],
+                    'api_key' => ['label' => 'API ключ', 'type' => 'password'],
                 ],
                 'factory' => function () {
                     if (empty($this->settings['apicar_api_key'])) return null;
@@ -142,8 +142,8 @@ class VINFallbackSearch
                 'tag' => 'Auction-api',
                 'enabled_field' => 'api2_enabled',
                 'fields' => [
-                    'login' => ['label' => 'Р›РѕРіРёРЅ Second API', 'type' => 'text'],
-                    'password' => ['label' => 'РџР°СЂРѕР»СЊ Second API', 'type' => 'password'],
+                    'login' => ['label' => 'Логин (email)', 'type' => 'text'],
+                    'password' => ['label' => 'Пароль', 'type' => 'password'],
                 ],
                 'factory' => function () {
                     if (empty($this->settings['api2_login']) || empty($this->settings['api2_password'])) return null;
@@ -156,7 +156,7 @@ class VINFallbackSearch
                 'tag' => 'Auctionsapi',
                 'enabled_field' => 'api3_enabled',
                 'fields' => [
-                    'key' => ['label' => 'API РєР»СЋС‡ Third API', 'type' => 'password'],
+                    'key' => ['label' => 'API ключ (x-api-key)', 'type' => 'password'],
                 ],
                 'factory' => function () {
                     if (empty($this->settings['api3_key'])) return null;
@@ -220,122 +220,6 @@ class VINFallbackSearch
     public function settings_init()
     {
         register_setting('vin_fallback_settings', 'vin_fallback_settings', [$this, 'sanitize_settings']);
-
-        // Основная секция
-        add_settings_section(
-            'vin_fallback_providers_section',
-            'Настройки API провайдеров',
-            [$this, 'settings_section_callback'],
-            'vin_fallback_settings'
-        );
-
-        // Поля для провайдеров
-        $providers_config = [
-            'apicar' => [
-                'enabled' => ['label' => 'Apicar.store включен', 'desc' => 'Включить поиск через Apicar.store'],
-                'api_key' => ['label' => 'API ключ Apicar.store', 'type' => 'password']
-            ],
-            'api2' => [
-                'enabled' => ['label' => 'Second API включен', 'desc' => 'Включить Second API (Auction API)'],
-                'login' => ['label' => 'Логин Second API', 'type' => 'text'],
-                'password' => ['label' => 'Пароль Second API', 'type' => 'password']
-            ],
-            'api3' => [
-                'enabled' => ['label' => 'Third API включен', 'desc' => 'Включить Third API'],
-                'key' => ['label' => 'API ключ Third API', 'type' => 'password']
-            ]
-        ];
-
-        foreach ($providers_config as $provider => $fields) {
-            foreach ($fields as $field => $config) {
-                $field_name = $provider . '_' . $field;
-                add_settings_field(
-                    $field_name,
-                    $config['label'],
-                    isset($config['type']) ? [$this, 'text_field_render'] : [$this, 'checkbox_field_render'],
-                    'vin_fallback_settings',
-                    'vin_fallback_providers_section',
-                    [
-                        'field' => $field_name,
-                        'label' => $config['desc'] ?? '',
-                        'type' => $config['type'] ?? ''
-                    ]
-                );
-            }
-        }
-
-        foreach ($this->get_provider_registry() as $provider => $provider_config) {
-            if (isset($providers_config[$provider])) {
-                continue;
-            }
-
-            add_settings_field(
-                $provider . '_enabled',
-                $provider_config['label'] . ' enabled',
-                [$this, 'checkbox_field_render'],
-                'vin_fallback_settings',
-                'vin_fallback_providers_section',
-                [
-                    'field' => $provider . '_enabled',
-                    'label' => 'Включить источник ' . $provider_config['label'],
-                ]
-            );
-
-            foreach ($provider_config['fields'] as $field => $config) {
-                $field_name = $provider . '_' . $field;
-                add_settings_field(
-                    $field_name,
-                    $config['label'],
-                    [$this, 'text_field_render'],
-                    'vin_fallback_settings',
-                    'vin_fallback_providers_section',
-                    [
-                        'field' => $field_name,
-                        'label' => $config['desc'] ?? '',
-                        'type' => $config['type'] ?? 'text'
-                    ]
-                );
-            }
-        }
-
-        add_settings_field(
-            'provider_order',
-            'Порядок источников API',
-            [$this, 'provider_order_field_render'],
-            'vin_fallback_settings',
-            'vin_fallback_providers_section'
-        );
-
-        add_settings_section(
-            'vin_fallback_product_section',
-            'Настройки создаваемых товаров',
-            [$this, 'product_settings_section_callback'],
-            'vin_fallback_settings'
-        );
-
-        add_settings_field(
-            'title_template',
-            'Шаблон названия товара',
-            [$this, 'title_template_field_render'],
-            'vin_fallback_settings',
-            'vin_fallback_product_section'
-        );
-
-        $template_fields = [
-            'slug_template' => 'Шаблон URL slug',
-        ];
-
-        foreach ($template_fields as $field => $label) {
-            add_settings_field(
-                $field,
-                $label,
-                [$this, 'template_field_render'],
-                'vin_fallback_settings',
-                'vin_fallback_product_section',
-                ['field' => $field]
-            );
-        }
-
     }
 
     public function sanitize_settings($input)
@@ -382,153 +266,81 @@ class VINFallbackSearch
         return $settings;
     }
 
-    /**
-     * Рендер чекбокса
-     */
-    public function checkbox_field_render($args)
+    private function get_provider_state($provider_id, array $config)
     {
-        $field = $args['field'];
-        $checked = isset($this->settings[$field]) ? $this->settings[$field] : 0;
-?>
-        <label>
-            <input type='checkbox' name='vin_fallback_settings[<?php echo $field; ?>]' value='1' <?php checked(1, $checked); ?>>
-            <?php echo $args['label']; ?>
-        </label>
+        $enabled_field = $config['enabled_field'] ?? ($provider_id . '_enabled');
+        $configured = is_callable($config['factory'] ?? null) && call_user_func($config['factory']) instanceof VIN_Provider_Interface;
+
+        if (empty($this->settings[$enabled_field])) {
+            return ['key' => 'off', 'label' => 'Выключен'];
+        }
+        if (!$configured) {
+            return ['key' => 'warn', 'label' => 'Не заполнены доступы'];
+        }
+        return ['key' => 'good', 'label' => 'Участвует в поиске'];
+    }
+
+    private function render_provider_card($provider_id, array $config, $position)
+    {
+        $enabled_field = $config['enabled_field'] ?? ($provider_id . '_enabled');
+        $state = $this->get_provider_state($provider_id, $config);
+    ?>
+        <li class="vfs-provider vfs-state-<?php echo esc_attr($state['key']); ?>" data-id="<?php echo esc_attr($provider_id); ?>">
+            <div class="vfs-provider-head">
+                <span class="vfs-position"><?php echo (int) $position; ?></span>
+                <div class="vfs-provider-name">
+                    <strong><?php echo esc_html($config['label']); ?></strong>
+                    <code><?php echo esc_html($provider_id); ?></code>
+                </div>
+                <span class="vfs-badge vfs-badge-<?php echo esc_attr($state['key']); ?>"><?php echo esc_html($state['label']); ?></span>
+                <label class="vfs-switch">
+                    <input type="checkbox" name="vin_fallback_settings[<?php echo esc_attr($enabled_field); ?>]" value="1" <?php checked(1, (int) ($this->settings[$enabled_field] ?? 0)); ?>>
+                    Включить
+                </label>
+                <span class="vfs-move">
+                    <button type="button" class="button button-small vfs-move-up" title="Выше" aria-label="Поднять выше">&uarr;</button>
+                    <button type="button" class="button button-small vfs-move-down" title="Ниже" aria-label="Опустить ниже">&darr;</button>
+                </span>
+            </div>
+            <div class="vfs-provider-fields">
+                <?php foreach ($config['fields'] as $field => $field_config) :
+                    $name = $provider_id . '_' . $field;
+                    $type = $field_config['type'] ?? 'text';
+                ?>
+                    <label>
+                        <span><?php echo esc_html($field_config['label']); ?></span>
+                        <input type="<?php echo esc_attr($type); ?>" name="vin_fallback_settings[<?php echo esc_attr($name); ?>]" value="<?php echo esc_attr($this->settings[$name] ?? ''); ?>" autocomplete="<?php echo $type === 'password' ? 'new-password' : 'off'; ?>">
+                    </label>
+                <?php endforeach; ?>
+            </div>
+        </li>
     <?php
     }
 
-    /**
-     * Рендер текстового поля
-     */
-    public function text_field_render($args)
+    public function template_field_render($field)
     {
-        $field = $args['field'];
-        $value = isset($this->settings[$field]) ? $this->settings[$field] : '';
-        $type = isset($args['type']) ? $args['type'] : 'text';
+        $default = $field === 'title_template' ? $this->get_default_title_template() : '';
+        $value = $this->settings[$field] ?? $default;
+        $target_id = 'vin-template-' . $field;
     ?>
-        <input type='<?php echo $type; ?>' name='vin_fallback_settings[<?php echo $field; ?>]' value='<?php echo esc_attr($value); ?>' class='regular-text'>
-    <?php
-    }
-
-    public function product_settings_section_callback()
-    {
-        echo 'Настройте, как плагин будет формировать данные нового WooCommerce-товара при импорте по VIN.';
-    }
-
-    public function title_template_field_render()
-    {
-        $value = $this->settings['title_template'] ?? $this->get_default_title_template();
-        $tokens = $this->get_title_template_tokens();
-    ?>
-        <input
-            type="text"
-            id="vin-title-template"
-            name="vin_fallback_settings[title_template]"
-            value="<?php echo esc_attr($value); ?>"
-            class="large-text"
-            placeholder="<?php echo esc_attr($this->get_default_title_template()); ?>"
-        >
-        <p class="description">Можно менять порядок, добавлять обычный текст и вставлять свойства кнопками ниже.</p>
-        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;max-width:900px;">
-            <?php foreach ($tokens as $token => $label) : ?>
-                <button type="button" class="button vin-title-token" data-token="<?php echo esc_attr($token); ?>"><?php echo esc_html($label); ?></button>
-            <?php endforeach; ?>
-        </div>
-        <p class="description">
-            Пример: <code>{make} {model} {year} - VIN {vin}</code>
-        </p>
-        <script>
-            (function() {
-                var input = document.getElementById('vin-title-template');
-                if (!input) return;
-                document.querySelectorAll('.vin-title-token').forEach(function(button) {
-                    button.addEventListener('click', function() {
-                        var token = button.getAttribute('data-token') || '';
-                        var start = input.selectionStart || input.value.length;
-                        var end = input.selectionEnd || input.value.length;
-                        var prefix = input.value.slice(0, start);
-                        var suffix = input.value.slice(end);
-                        var spacer = prefix && !/\s$/.test(prefix) ? ' ' : '';
-                        input.value = prefix + spacer + token + suffix;
-                        input.focus();
-                        var pos = (prefix + spacer + token).length;
-                        input.setSelectionRange(pos, pos);
-                    });
-                });
-            })();
-        </script>
-    <?php
-    }
-
-    public function provider_order_field_render()
-    {
-        $order = $this->get_provider_order();
-        $registry = $this->get_provider_registry();
-    ?>
-        <input type="text" name="vin_fallback_settings[provider_order]" value="<?php echo esc_attr(implode(',', $order)); ?>" class="regular-text">
-        <p class="description">Укажите ID источников через запятую. Доступно: <?php echo esc_html(implode(', ', array_keys($registry))); ?>.</p>
-        <ol style="margin-top:8px;">
-            <?php foreach ($order as $id) : if (!isset($registry[$id])) continue; ?>
-                <li><code><?php echo esc_html($id); ?></code> - <?php echo esc_html($registry[$id]['label']); ?></li>
-            <?php endforeach; ?>
-        </ol>
-    <?php
-    }
-
-    public function template_field_render($args)
-    {
-        $field = $args['field'];
-        $value = $this->settings[$field] ?? '';
-        $target_id = 'vin-template-' . esc_attr($field);
-        $tokens = $this->get_title_template_tokens();
-    ?>
-        <input id="<?php echo $target_id; ?>" type="text" name="vin_fallback_settings[<?php echo esc_attr($field); ?>]" value="<?php echo esc_attr($value); ?>" class="large-text">
-        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;max-width:900px;">
-            <?php foreach ($tokens as $token => $label) : ?>
-                <button type="button" class="button vin-template-token" data-target="<?php echo $target_id; ?>" data-token="<?php echo esc_attr($token); ?>"><?php echo esc_html($label); ?></button>
+        <input id="<?php echo esc_attr($target_id); ?>" type="text" name="vin_fallback_settings[<?php echo esc_attr($field); ?>]" value="<?php echo esc_attr($value); ?>" placeholder="<?php echo esc_attr($default); ?>" class="large-text">
+        <div class="vfs-tokens">
+            <?php foreach ($this->get_title_template_tokens() as $token => $label) : ?>
+                <button type="button" class="button button-small vin-template-token" data-target="<?php echo esc_attr($target_id); ?>" data-token="<?php echo esc_attr($token); ?>"><?php echo esc_html($label); ?></button>
             <?php endforeach; ?>
         </div>
         <p class="description"><?php echo esc_html($this->get_template_field_hint($field)); ?></p>
-        <script>
-            (function() {
-                if (window.vinTemplateButtonsReady) return;
-                window.vinTemplateButtonsReady = true;
-                document.addEventListener('click', function(event) {
-                    var button = event.target.closest('.vin-template-token');
-                    if (!button) return;
-                    var input = document.getElementById(button.getAttribute('data-target'));
-                    if (!input) return;
-                    var token = button.getAttribute('data-token') || '';
-                    var start = input.selectionStart || input.value.length;
-                    var end = input.selectionEnd || input.value.length;
-                    var prefix = input.value.slice(0, start);
-                    var suffix = input.value.slice(end);
-                    var spacer = prefix && !/\s$/.test(prefix) ? ' ' : '';
-                    input.value = prefix + spacer + token + suffix;
-                    input.focus();
-                    var pos = (prefix + spacer + token).length;
-                    input.setSelectionRange(pos, pos);
-                });
-            })();
-        </script>
     <?php
     }
 
     private function get_template_field_hint($field)
     {
         $hints = [
-            'slug_template' => 'Если оставить пустым, используется старая генерация slug. Пример: {make}-{model}-{year}-{lot_number}.',
+            'title_template' => 'Можно менять порядок, добавлять обычный текст и вставлять свойства кнопками. Пример: {make} {model} {year} - VIN {vin}.',
+            'slug_template' => 'Если оставить пустым, используется стандартная генерация slug. Пример: {make}-{model}-{year}-{lot_number}.',
         ];
 
         return $hints[$field] ?? '';
-    }
-
-    /**
-     * Описание секции
-     */
-    public function settings_section_callback()
-    {
-        echo 'Настройте API провайдеров для поиска автомобилей по VIN. Можно включить/выключить каждый провайдер отдельно.';
     }
 
     /**
@@ -536,74 +348,88 @@ class VINFallbackSearch
      */
     public function settings_page()
     {
+        $registry = $this->get_provider_registry();
+        $order = $this->get_provider_order();
+        $standalone = !(defined('MAC_MASTER_ACTIVE') && MAC_MASTER_ACTIVE);
     ?>
-        <div class="wrap">
-            <h1>Настройки поиска авто по VIN</h1>
+        <div class="wrap vfs-page">
+            <?php if ($standalone) : ?>
+                <h1>Настройки поиска авто по VIN</h1>
+            <?php endif; ?>
+            <?php settings_errors(); ?>
 
-            <form action='options.php' method='post'>
-                <?php
-                settings_fields('vin_fallback_settings');
-                do_settings_sections('vin_fallback_settings');
-                submit_button();
-                ?>
+            <nav class="vfs-toc">
+                <a href="#vfs-sources">1. Источники API</a>
+                <a href="#vfs-product">2. Создаваемые товары</a>
+                <a href="#vfs-test">3. Тест API по VIN</a>
+                <a href="#vfs-logic">4. Как работает поиск</a>
+            </nav>
+
+            <form action="options.php" method="post">
+                <?php settings_fields('vin_fallback_settings'); ?>
+
+                <section class="vfs-panel" id="vfs-sources">
+                    <header>
+                        <h2>1. Источники API</h2>
+                        <p>Поиск идёт сверху вниз до первого найденного авто. Порядок меняется стрелками и сохраняется вместе с настройками.</p>
+                    </header>
+                    <ol class="vfs-providers" id="vfs-providers">
+                        <?php foreach ($order as $i => $provider_id) {
+                            $this->render_provider_card($provider_id, $registry[$provider_id], $i + 1);
+                        } ?>
+                    </ol>
+                    <input type="hidden" id="vfs-provider-order" name="vin_fallback_settings[provider_order]" value="<?php echo esc_attr(implode(',', $order)); ?>">
+                </section>
+
+                <section class="vfs-panel" id="vfs-product">
+                    <header>
+                        <h2>2. Создаваемые товары</h2>
+                        <p>Как плагин формирует название и URL нового WooCommerce-товара при импорте по VIN.</p>
+                    </header>
+                    <div class="vfs-field">
+                        <label for="vin-template-title_template">Шаблон названия товара</label>
+                        <?php $this->template_field_render('title_template'); ?>
+                    </div>
+                    <div class="vfs-field">
+                        <label for="vin-template-slug_template">Шаблон URL (slug)</label>
+                        <?php $this->template_field_render('slug_template'); ?>
+                    </div>
+                </section>
+
+                <div class="vfs-save"><?php submit_button('Сохранить настройки', 'primary', 'submit', false); ?></div>
             </form>
 
-            <div class="card" style="margin-top: 20px;">
-                <h3>Тест API по VIN</h3>
-                <p>
-                    <input type="text" id="vin-api-test-input" class="regular-text" placeholder="19VDE1F5XDE010374">
-                    <button type="button" class="button button-primary" id="vin-api-test-button">Проверить активные API</button>
-                </p>
-                <pre id="vin-api-test-result" style="display:none;max-height:480px;overflow:auto;background:#f6f7f7;padding:12px;border:1px solid #dcdcde;"></pre>
-            </div>
+            <section class="vfs-panel" id="vfs-test">
+                <header>
+                    <h2>3. Тест API по VIN</h2>
+                    <p>Опрашивает все включённые источники и ничего не создаёт на сайте. По каждому запросу видно, что мы отправили и что ответил сервер. «Скопировать для поддержки» собирает готовый текст для техподдержки API, ключи и пароли в нём замаскированы.</p>
+                </header>
+                <div class="vfs-test-form">
+                    <input type="text" id="vin-api-test-input" class="regular-text" maxlength="17" placeholder="19VDE1F5XDE010374" autocomplete="off">
+                    <button type="button" class="button button-primary" id="vin-api-test-button">Проверить</button>
+                    <span class="description">Используются сохранённые настройки.</span>
+                </div>
+                <div id="vin-api-test-result" class="vfs-test-result" hidden></div>
+            </section>
 
-            <div class="card" style="margin-top: 20px;">
-                <h3>Логика поиска</h3>
-                <ol>
-                    <li>Если нашли авто по VIN на сайте - показываем его в поиске</li>
-                    <li>Если не нашли - ищем в API 1</li>
-                    <li>Если не нашли в API 1 или он выключен - ищем в API 2</li>
-                    <li>Если не нашли в API 2 или он выключен - ищем в API 3</li>
-                    <li>Если не нашли в API 3 или он выключен - показываем "ничего не найдено"</li>
-                    <li>Если нашли авто на сайте, но он в черновиках - показываем "ничего не найдено"</li>
+            <section class="vfs-panel" id="vfs-logic">
+                <header><h2>4. Как работает поиск</h2></header>
+                <ol class="vfs-logic">
+                    <li>VIN уже есть на сайте и товар опубликован: показываем его.</li>
+                    <li>Товар есть, но в черновиках или скрыт: показываем «ничего не найдено».</li>
+                    <?php foreach ($order as $provider_id) :
+                        $state = $this->get_provider_state($provider_id, $registry[$provider_id]);
+                    ?>
+                        <li>
+                            Ищем в <strong><?php echo esc_html($registry[$provider_id]['label']); ?></strong>, если нашли, создаём товар и показываем его.
+                            <?php if ($state['key'] !== 'good') : ?><span class="vfs-badge vfs-badge-<?php echo esc_attr($state['key']); ?>">Пропускается: <?php echo esc_html(mb_strtolower($state['label'])); ?></span><?php endif; ?>
+                        </li>
+                    <?php endforeach; ?>
+                    <li>Нигде не нашли: показываем «ничего не найдено».</li>
                 </ol>
-
-                <h3>Отладка</h3>
-                <p>Для тестирования используйте REST URL: <code>/wp-json/master-auto-catalog/v1/vin-data?vin=YOUR_VIN_HERE</code></p>
-                <p>Пример: <code>/wp-json/master-auto-catalog/v1/vin-data?vin=19VDE1F5XDE010374</code></p>
-            </div>
+                <p class="description">REST для отладки: <code>GET /wp-json/master-auto-catalog/v1/vin-data?vin=VIN</code> с заголовком <code>X-API-Key</code>, равным Sync Key из «Синхронизации с центром».</p>
+            </section>
         </div>
-        <script>
-            (function() {
-                var button = document.getElementById('vin-api-test-button');
-                var input = document.getElementById('vin-api-test-input');
-                var result = document.getElementById('vin-api-test-result');
-                if (!button || !input || !result) return;
-
-                button.addEventListener('click', function() {
-                    var vin = (input.value || '').trim();
-                    result.style.display = 'block';
-                    result.textContent = 'Loading...';
-                    button.disabled = true;
-
-                    var body = new URLSearchParams();
-                    body.append('action', 'vin_fallback_test_provider');
-                    body.append('nonce', '<?php echo esc_js(wp_create_nonce('vin_fallback_test_provider')); ?>');
-                    body.append('vin', vin);
-
-                    fetch(ajaxurl, {
-                        method: 'POST',
-                        credentials: 'same-origin',
-                        headers: {'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
-                        body: body.toString()
-                    })
-                    .then(function(response) { return response.json(); })
-                    .then(function(data) { result.textContent = JSON.stringify(data, null, 2); })
-                    .catch(function(error) { result.textContent = String(error); })
-                    .finally(function() { button.disabled = false; });
-                });
-            })();
-        </script>
     <?php
     }
 
@@ -653,10 +479,14 @@ class VINFallbackSearch
     {
         if (strpos($hook, 'vin-fallback') === false) return;
 
-        echo '<style>
-            .vin-status-active { color: green; font-weight: bold; }
-            .vin-status-inactive { color: red; }
-        </style>';
+        $base = plugin_dir_path(__FILE__) . 'assets/';
+        $url = plugin_dir_url(__FILE__) . 'assets/';
+        wp_enqueue_style('vin-fallback-admin', $url . 'admin.css', [], (string) filemtime($base . 'admin.css'));
+        wp_enqueue_script('vin-fallback-admin', $url . 'admin.js', [], (string) filemtime($base . 'admin.js'), true);
+        wp_localize_script('vin-fallback-admin', 'vinFallbackAdmin', [
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce' => wp_create_nonce('vin_fallback_test_provider'),
+        ]);
     }
 
     /**
@@ -1526,39 +1356,58 @@ class VINFallbackSearch
             wp_send_json_error(['message' => 'Invalid VIN format', 'vin' => $vin], 400);
         }
 
-        $providers = apply_filters('vin_fallback_providers', []);
+        $registry = $this->get_provider_registry();
         $out = [
             'vin' => $vin,
-            'providers_count' => count($providers),
+            'site' => home_url('/'),
+            'tested_at_utc' => gmdate('Y-m-d\TH:i:s\Z'),
+            'php' => PHP_VERSION,
+            'wordpress' => get_bloginfo('version'),
             'providers' => [],
         ];
 
-        foreach ($providers as $provider) {
-            $provider_class = get_class($provider);
+        foreach ($this->get_provider_order() as $provider_id) {
+            $config = $registry[$provider_id];
+            $row = [
+                'id' => $provider_id,
+                'label' => $config['label'],
+                'class' => $config['class'],
+                'tag' => $config['tag'],
+            ];
+
+            $enabled_field = $config['enabled_field'] ?? ($provider_id . '_enabled');
+            $provider = is_callable($config['factory'] ?? null) ? call_user_func($config['factory']) : null;
+            if (empty($this->settings[$enabled_field])) {
+                $out['providers'][] = $row + ['status' => 'disabled'];
+                continue;
+            }
+            if (!$provider instanceof VIN_Provider_Interface) {
+                $out['providers'][] = $row + ['status' => 'not_configured'];
+                continue;
+            }
+
             $started = microtime(true);
+            VIN_Provider_Http_Trace::start();
 
             try {
                 $item = $provider->search($vin);
-                $generated_title = $item ? $this->build_product_title($item, $provider_class) : null;
-
-                $out['providers'][] = [
-                    'class' => $provider_class,
-                    'tag' => $this->get_provider_tag($provider_class),
-                    'elapsed_ms' => round((microtime(true) - $started) * 1000),
-                    'found' => (bool)$item,
+                $generated_title = $item ? $this->build_product_title($item, $config['class']) : null;
+                $row += [
+                    'status' => $item ? 'found' : 'not_found',
                     'generated_title' => $generated_title,
-                    'generated_slug' => $item ? $this->build_product_slug($item, $generated_title, $item['sku'] ?? $vin, $provider_class) : null,
+                    'generated_slug' => $item ? $this->build_product_slug($item, $generated_title, $item['sku'] ?? $vin, $config['class']) : null,
                     'item' => $item,
                 ];
             } catch (\Throwable $e) {
-                $out['providers'][] = [
-                    'class' => $provider_class,
-                    'tag' => $this->get_provider_tag($provider_class),
-                    'elapsed_ms' => round((microtime(true) - $started) * 1000),
-                    'found' => false,
+                $row += [
+                    'status' => 'error',
                     'error' => $e->getMessage(),
                 ];
             }
+
+            $row['elapsed_ms'] = (int) round((microtime(true) - $started) * 1000);
+            $row['http'] = VIN_Provider_Http_Trace::stop();
+            $out['providers'][] = $row;
         }
 
         wp_send_json_success($out);

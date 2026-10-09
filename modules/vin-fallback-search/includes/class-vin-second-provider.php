@@ -34,7 +34,7 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
         // Запрашиваем данные по VIN
         $url = 'https://auction-api.app/api/v1/get-vin-history';
 
-        $response = wp_remote_post($url, [
+        $response = mac_vin_provider_request('POST', $url, [
             'timeout'     => 30,
             'redirection' => 0,
             'headers'     => [
@@ -67,7 +67,7 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
             }
 
             // Повторяем запрос с новым токеном
-            $response = wp_remote_post($url, [
+            $response = mac_vin_provider_request('POST', $url, [
                 'timeout'     => 30,
                 'redirection' => 0,
                 'headers'     => [
@@ -147,7 +147,7 @@ class VIN_Second_API_Provider implements VIN_Provider_Interface
         // Получаем новый токен
         $url = 'https://auction-api.app/api/v1/login';
 
-        $response = wp_remote_post($url, [
+        $response = mac_vin_provider_request('POST', $url, [
             'timeout'     => 20,
             'redirection' => 0,
             'headers'     => [
