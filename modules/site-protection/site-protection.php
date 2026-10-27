@@ -13,19 +13,14 @@ function mac_site_protection_state_version() {
  * The central agent forwards short-lived local observations to the selected
  * centre and applies only decisions explicitly queued by an administrator.
  */
-const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '1.3.0';
+const MAC_SITE_PROTECTION_CENTRAL_AGENT_VERSION = '2.0.0';
 
 // Lowest values accepted from the centre. They only prevent a typo from
-// blocking every visitor; the real limits are chosen in the centre.
-const MAC_SP_MIN_SITE_RATE = 5;
-const MAC_SP_MIN_SITE_DAILY = 20;
-const MAC_SP_MIN_BOT_RATE = 3;
-const MAC_SP_MIN_PRODUCT_DAILY = 3;
-
-// Site search stays available to visitors, but it lists the catalogue, so it
-// has its own generous limits instead of being exempt from protection.
-const MAC_SP_SEARCH_WINDOW_LIMIT = 20;
-const MAC_SP_SEARCH_DAILY_LIMIT = 100;
+// limiting every visitor; the real limits are chosen in the centre.
+const MAC_SP_MIN_CARD_HOUR = 10;
+const MAC_SP_MIN_CARD_DAILY = 30;
+const MAC_SP_MIN_BLOCK_HOUR = 20;
+const MAC_SP_MIN_RHYTHM_SAMPLES = 8;
 
 // Sitemaps and feeds are served only to verified search engines.
 const MAC_SP_SITEMAP_BLOCK_MINUTES = 30 * 24 * 60;
@@ -60,6 +55,13 @@ add_action('init', function () {
         $index = $wpdb->get_row("SHOW INDEX FROM {$table} WHERE Key_name='daily_incident'", ARRAY_A);
         if ($index && (int) ($index['Non_unique'] ?? 1) === 0) $wpdb->query("ALTER TABLE {$table} DROP INDEX daily_incident, ADD INDEX daily_incident (ip_address, rule_key, incident_date)");
         if (!$wpdb->last_error) update_option('mac_site_protection_incidents_schema_v2', '1', false);
+    }
+    if (get_option('mac_site_protection_rhythm_v1') !== '1') {
+        global $wpdb;
+        $table = $wpdb->prefix . 'site_protection_rhythm';
+        $charset = $wpdb->get_charset_collate();
+        $wpdb->query("CREATE TABLE IF NOT EXISTS {$table} (subject VARCHAR(80) NOT NULL, stamps TEXT NOT NULL, updated_at DATETIME NOT NULL, PRIMARY KEY (subject), KEY updated_at (updated_at)) {$charset}");
+        if (!$wpdb->last_error) update_option('mac_site_protection_rhythm_v1', '1', false);
     }
 });
 
@@ -204,16 +206,19 @@ function mac_site_protection_central_apply_command(array $command) {
 
 function mac_site_protection_central_apply_settings(array $remote) {
     $settings = mac_site_protection_settings();
-    $settings['rate_limit_count'] = max(MAC_SP_MIN_SITE_RATE, (int)($remote['site_rate_limit'] ?? $settings['rate_limit_count']));
-    $settings['xml_rate_limit_count'] = max(1, (int)($remote['xml_rate_limit'] ?? $settings['xml_rate_limit_count']));
-    $settings['site_daily_limit'] = max(MAC_SP_MIN_SITE_DAILY, (int)($remote['site_daily_limit'] ?? $settings['site_daily_limit']));
-    $settings['xml_daily_limit'] = max(1, (int)($remote['xml_daily_limit'] ?? $settings['xml_daily_limit']));
-    $settings['rate_limit_minutes'] = max(1, (int)($remote['window_minutes'] ?? $settings['rate_limit_minutes']));
-    $settings['xml_rate_limit_minutes'] = $settings['rate_limit_minutes'];
+    $number = static function ($key, $min) use ($remote, $settings) {
+        return max($min, (int) ($remote[$key] ?? $settings[$key]));
+    };
     $settings['protection_mode'] = !empty($remote['auto_block_enabled']) ? 'enforce' : 'monitor';
-    $settings['unverified_bot_limit'] = max(MAC_SP_MIN_BOT_RATE, (int) ($remote['unverified_bot_limit'] ?? $settings['unverified_bot_limit']));
-    $settings['seo_bot_limit'] = max(MAC_SP_MIN_BOT_RATE, (int) ($remote['seo_bot_limit'] ?? $settings['seo_bot_limit']));
-    $settings['product_daily_limit'] = max(MAC_SP_MIN_PRODUCT_DAILY, (int) ($remote['product_daily_limit'] ?? $settings['product_daily_limit']));
+    $settings['card_hour_limit'] = $number('card_hour_limit', MAC_SP_MIN_CARD_HOUR);
+    $settings['card_daily_limit'] = $number('card_daily_limit', MAC_SP_MIN_CARD_DAILY);
+    $settings['block_hour_limit'] = $number('block_hour_limit', MAC_SP_MIN_BLOCK_HOUR);
+    $settings['block_minutes'] = $number('block_minutes', 10);
+    $settings['repeat_block_minutes'] = $number('repeat_block_minutes', 10);
+    $settings['rhythm_samples'] = min(50, $number('rhythm_samples', MAC_SP_MIN_RHYTHM_SAMPLES));
+    $settings['rhythm_spread'] = min(100, $number('rhythm_spread', 1));
+    $settings['rhythm_block_minutes'] = $number('rhythm_block_minutes', 10);
+    if (array_key_exists('rhythm_enabled', $remote)) $settings['rhythm_enabled'] = !empty($remote['rhythm_enabled']) ? '1' : '0';
     update_option(MAC_SITE_PROTECTION_OPTION, $settings, false);
 }
 
@@ -286,6 +291,7 @@ function mac_site_protection_central_sync() {
     }
 
     if (!empty($body['settings']) && is_array($body['settings'])) mac_site_protection_central_apply_settings($body['settings']);
+    if (!empty($body['profile']) && is_array($body['profile'])) update_option(MAC_SITE_PROTECTION_PROFILE_OPTION, mac_site_protection_clean_profile($body['profile']), false);
 
     if ($eventsRows) $wpdb->query("DELETE FROM {$eventsTable} WHERE id IN (" . implode(',', array_map('intval', wp_list_pluck($eventsRows, 'id'))) . ')');
     if ($sitemapRows) $wpdb->query("DELETE FROM {$sitemapTable} WHERE id IN (" . implode(',', array_map('intval', wp_list_pluck($sitemapRows, 'id'))) . ')');
@@ -302,6 +308,7 @@ function mac_site_protection_central_sync() {
     $wpdb->query($wpdb->prepare("DELETE FROM {$crawlerTable} WHERE log_date < %s", $cutoff));
     $wpdb->query($wpdb->prepare("DELETE FROM {$wpdb->prefix}crawler_log_samples WHERE log_date < %s", $cutoff));
     $wpdb->query("DELETE FROM {$wpdb->prefix}site_protection_rate_buckets WHERE bucket_start < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 2 DAY) LIMIT 10000");
+    $wpdb->query("DELETE FROM {$wpdb->prefix}site_protection_rhythm WHERE updated_at < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) LIMIT 10000");
     $receivedCommandIds = [];
     $newAcks = [];
     foreach ((array) ($body['commands'] ?? []) as $command) {
@@ -366,15 +373,12 @@ function mac_site_protection_state_key($prefix, $value = '') {
 
 function mac_site_protection_settings() {
     return wp_parse_args((array) get_option(MAC_SITE_PROTECTION_OPTION, []), [
-        'xml_rate_limit_enabled' => '1', 'rate_limit_enabled' => '1',
         // Start new installations in observation mode. It records threshold
-        // crossings but never returns 429 until an administrator enables it.
+        // crossings but never limits or blocks until the centre enables it.
         'protection_mode' => 'monitor',
-        'rate_limit_count' => '60', 'rate_limit_minutes' => '20',
-        'xml_rate_limit_count' => '2', 'xml_rate_limit_minutes' => '20',
-        'site_daily_limit' => '200', 'xml_daily_limit' => '10',
-        'unverified_bot_limit' => '30', 'seo_bot_limit' => '30',
-        'product_daily_limit' => '10',
+        'card_hour_limit' => '50', 'card_daily_limit' => '300',
+        'block_hour_limit' => '100', 'block_minutes' => '1440', 'repeat_block_minutes' => '10080',
+        'rhythm_enabled' => '1', 'rhythm_samples' => '20', 'rhythm_spread' => '25', 'rhythm_block_minutes' => '10080',
         'ip_whitelist' => '', 'ua_whitelist' => '', 'telegram_topic_id' => '27659',
     ]);
 }
@@ -488,15 +492,6 @@ function mac_site_protection_expire_blocks() {
     $expired = $wpdb->query($wpdb->prepare("UPDATE {$wpdb->prefix}site_protection_blocks SET is_active = 0 WHERE is_active = 1 AND expires_at IS NOT NULL AND expires_at <= %s", current_time('mysql')));
     if ($expired) delete_transient('mac_sp_block_ranges');
 }
-function mac_site_protection_escalation_minutes($level) {
-    return [
-        1 => 10,
-        2 => HOUR_IN_SECONDS / MINUTE_IN_SECONDS,
-        3 => DAY_IN_SECONDS / MINUTE_IN_SECONDS,
-        4 => 30 * DAY_IN_SECONDS / MINUTE_IN_SECONDS,
-        5 => null,
-    ][$level] ?? null;
-}
 function mac_site_protection_register_incident($ip, $rule_key) {
     global $wpdb;
     $today = current_time('Y-m-d'); $from = wp_date('Y-m-d', time() - 30 * DAY_IN_SECONDS);
@@ -576,46 +571,43 @@ function mac_site_protection_traffic_class($ua, $ip) {
     return mac_site_protection_browser_signal_score($ua) >= 2 ? 'suspicious_browser' : 'visitor';
 }
 
-function mac_site_protection_is_meaningful_request($path) {
-    $uri = (string) ($_SERVER['REQUEST_URI'] ?? '');
-    if (preg_match('#^/(?:wp-admin|wp-login\.php|wp-cron\.php)(?:/|$)#i', $path)) return false;
-    if (preg_match('#^/wp-json(?:/|$)#i', $path) || strpos($uri, 'rest_route=') !== false || strpos($uri, 'wc-ajax=') !== false) {
-        return mac_site_protection_is_public_catalog_api($path, $uri);
-    }
-    return preg_match('/\.(?:css|js|map|jpe?g|png|gif|webp|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip)$/i', $path) !== 1;
-}
-
-/**
- * Native WordPress search is intentionally outside the site-protection
- * counters. High search activity is useful to the catalogue and must not
- * create an intensive-crawler record or trigger an IP block.
- */
 function mac_site_protection_is_store_products_collection($path) {
     $route = (string) ($_GET['rest_route'] ?? $path);
     if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
     return preg_match('#^/wc/store/v[0-9]+/products/?$#i', $route) === 1;
 }
 
-function mac_site_protection_is_public_catalog_api($path, $uri) {
-    $route = (string) ($_GET['rest_route'] ?? $path);
-    if (preg_match('#^/wp-json#i', $route)) $route = substr($route, 8);
-    // Private catalogue routes are refused to guests, but each attempt still
-    // counts towards the page limit so that a crawler probing them is blocked.
-    return isset($_GET['wc-ajax'])
-        || mac_site_protection_is_private_rest_route($route);
-}
+// Plugin namespaces. Their routes work as before, but guests do not see them
+// listed: the same list on every site would tie the sites together.
+const MAC_SP_HIDDEN_REST_NAMESPACES = ['master-auto-catalog/v1', 'auto-sync/v1', 'cryptocloud/v1', 'heleket/v1'];
 
 /**
- * Core and WooCommerce routes that list or describe products. Visitors never
- * need them: the theme renders the catalogue on the server, the cart and the
- * checkout use other wc/store routes, and the centre uses its own namespaces
- * (auto-sync/v1, master-auto-catalog/v1) authenticated with X-API-Key.
+ * Core and WooCommerce routes that list or describe products, and the index
+ * pages of the plugin namespaces. Visitors never need them: the theme renders
+ * the catalogue on the server, the cart and the checkout use other wc/store
+ * routes, and the centre calls its own routes with X-API-Key.
  */
 function mac_site_protection_is_private_rest_route($route) {
     $route = '/' . ltrim((string) $route, '/');
+    foreach (MAC_SP_HIDDEN_REST_NAMESPACES as $namespace) {
+        if (untrailingslashit($route) === '/' . $namespace) return true;
+    }
     return preg_match('#^/wp/v[0-9]+(?:/|$)#i', $route) === 1
         || preg_match('#^/wc/store(?:/v[0-9]+)?/products(?:/|$)#i', $route) === 1;
 }
+
+add_filter('rest_index', function ($response) {
+    if (is_user_logged_in() || !($response instanceof WP_REST_Response)) return $response;
+    $data = $response->get_data();
+    if (isset($data['namespaces'])) $data['namespaces'] = array_values(array_diff((array) $data['namespaces'], MAC_SP_HIDDEN_REST_NAMESPACES));
+    foreach (array_keys((array) ($data['routes'] ?? [])) as $route) {
+        foreach (MAC_SP_HIDDEN_REST_NAMESPACES as $namespace) {
+            if (strpos($route, '/' . $namespace) === 0) unset($data['routes'][$route]);
+        }
+    }
+    $response->set_data($data);
+    return $response;
+});
 
 add_filter('rest_pre_dispatch', function ($result, $server, $request) {
     if ($result !== null || current_user_can('edit_posts')) return $result;
@@ -758,26 +750,6 @@ add_filter('wpseo_frontend_presenters', function ($presenters) {
     }));
 });
 
-function mac_site_protection_is_site_search_request($wp = null) {
-    if (array_key_exists('s', $_GET)) return true;
-    if (is_object($wp) && isset($wp->query_vars) && array_key_exists('s', (array) $wp->query_vars)) return true;
-
-    $query = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_QUERY);
-    if ($query === '') return false;
-    parse_str($query, $params);
-    return array_key_exists('s', $params);
-}
-
-/**
- * A search results page. Adding ?s= to any other address (a sitemap, a
- * product, a REST route) must not change how that address is protected.
- */
-function mac_site_protection_is_search_page($path, $wp = null) {
-    if (!mac_site_protection_is_site_search_request($wp)) return false;
-    return preg_match('#^/(?:page/[0-9]+/?)?$#i', (string) $path) === 1
-        || preg_match('#^/search(?:/|$)#i', (string) $path) === 1;
-}
-
 /**
  * Sitemaps and feeds publish the full product list with dates. Visitors never
  * open them, so only verified search engines receive them.
@@ -788,66 +760,97 @@ function mac_site_protection_is_listing_feed($path) {
     return preg_match('#/feed(?:/(?:rss2?|atom|rdf|rss-http))?/?$#i', (string) $path) === 1;
 }
 
-/**
- * Returns a stable key of the product addressed by this request, or ''.
- */
-function mac_site_protection_product_key($path) {
-    if (preg_match('#^/product/([^/]+)/?$#i', (string) $path, $match)) return strtolower($match[1]);
-    if (!empty($_GET['product']) && is_string($_GET['product'])) return strtolower($_GET['product']);
-    // ?p=ID resolves any post; it is also the way to enumerate new IDs.
-    if (!empty($_GET['p']) && is_scalar($_GET['p'])) return 'id-' . (int) $_GET['p'];
-    return '';
-}
-
 function mac_site_protection_is_own_server($ip) {
     if (in_array($ip, ['127.0.0.1', '::1'], true)) return true;
     $server = (string) ($_SERVER['SERVER_ADDR'] ?? '');
     return $server !== '' && hash_equals($server, (string) $ip);
 }
 
+function mac_site_protection_random_token($min, $max) {
+    return strtolower(wp_generate_password(random_int($min, $max), false, false));
+}
+
+/**
+ * Names and markup that the protection adds to public pages, chosen at
+ * random once per site. With fixed names the same cookie and the same hidden
+ * link on every site would show that the sites belong together.
+ */
+function mac_site_protection_fingerprint() {
+    static $fingerprint = null;
+    if ($fingerprint !== null) return $fingerprint;
+    $stored = get_option('mac_site_protection_fingerprint');
+    if (is_array($stored) && !empty($stored['cookie']) && !empty($stored['class'])) return $fingerprint = $stored;
+    $cookies = ['_vsid', '_uvt', '_tzo', '_sbv', '_cxs', '_pvt', '_lvs', '_ssr', '_dpv', '_hsv', '_rfs', '_wvc'];
+    $fingerprint = [
+        'cookie' => $cookies[array_rand($cookies)] . mac_site_protection_random_token(2, 4),
+        'value' => mac_site_protection_random_token(4, 10),
+        'class' => chr(random_int(97, 122)) . mac_site_protection_random_token(5, 9),
+        'text' => ['.', '·', '›', '»', '-'][random_int(0, 4)],
+        'style' => random_int(0, 2),
+    ];
+    update_option('mac_site_protection_fingerprint', $fingerprint, true);
+    return $fingerprint;
+}
+
 function mac_site_protection_honeypot_path() {
-    $option = 'mac_site_protection_honeypot_path_v2';
+    $option = 'mac_site_protection_honeypot_path_v3';
     $path = (string) get_option($option, '');
-    if (preg_match('#^/[a-z0-9][a-z0-9/_-]{12,120}\.(?:xml|json|txt|html|js)$#', $path)) {
-        return $path;
-    }
+    if (preg_match('#^/[a-z0-9][a-z0-9/_.-]{6,160}$#', $path)) return $path;
 
     // Generated once per site and kept in wp_options. Do not rotate this path:
     // robots.txt and the invisible link must always point to the same target.
-    $folders = ['assets', 'content', 'data', 'files', 'media', 'resources', 'static'];
-    $names = ['archive', 'catalog', 'feed', 'index', 'manifest', 'preview', 'resource'];
-    $extensions = ['xml', 'json', 'txt', 'html', 'js'];
-    $token = strtolower(wp_generate_password(14, false, false));
-    $path = '/' . $folders[array_rand($folders)] . '/' . $token . '/' . $names[array_rand($names)] . '-' . substr($token, 0, 7) . '.' . $extensions[array_rand($extensions)];
+    // The shape varies too, so robots.txt files of two sites do not match.
+    $folders = ['assets', 'content', 'data', 'files', 'media', 'resources', 'static', 'lib', 'storage', 'public', 'docs', 'export', 'cache', 'legacy', 'partners', 'dealer', 'inventory', 'stock', 'listing'];
+    $names = ['index', 'list', 'export', 'feed', 'dump', 'items', 'records', 'stock', 'inventory', 'full', 'all', 'backup', 'catalog', 'products', 'vehicles', 'lots'];
+    $extensions = ['xml', 'json', 'csv', 'txt', 'html'];
+    $segments = [];
+    for ($i = random_int(1, 3); $i > 0; $i--) $segments[] = random_int(0, 1) ? $folders[array_rand($folders)] : mac_site_protection_random_token(6, 14);
+    $name = $names[array_rand($names)] . (random_int(0, 1) ? (random_int(0, 1) ? '-' : '_') . mac_site_protection_random_token(4, 8) : '');
+    $path = '/' . implode('/', array_unique($segments)) . '/' . $name . '.' . $extensions[array_rand($extensions)];
     update_option($option, $path, false);
     return $path;
+}
+
+/** The current trap and the one older versions listed in robots.txt. */
+function mac_site_protection_honeypot_paths() {
+    $paths = [mac_site_protection_honeypot_path(), (string) get_option('mac_site_protection_honeypot_path_v2', '')];
+    return array_values(array_unique(array_filter(array_map('untrailingslashit', $paths))));
 }
 
 add_filter('robots_txt', function ($output, $public) {
     // Remove the legacy shared path on the first request after the update.
     $output = preg_replace('#^\s*Disallow:\s*/mac-crawler-trap/?\s*$#mi', '', (string) $output);
-    return rtrim($output) . "\nUser-agent: *\nDisallow: " . mac_site_protection_honeypot_path() . "\n";
+    $rule = 'Disallow: ' . mac_site_protection_honeypot_path();
+    // Join the existing "User-agent: *" group instead of adding a second one.
+    if (preg_match('/^User-agent:[ \t]*\*[ \t]*\r?$/mi', $output)) {
+        return preg_replace('/^(User-agent:[ \t]*\*[ \t]*)\r?$/mi', '$1' . "\n" . $rule, $output, 1);
+    }
+    return rtrim($output) . "\n\nUser-agent: *\n" . $rule . "\n";
 }, 10, 2);
 
 add_action('wp_footer', function () {
     if (is_admin()) return;
-    $path = mac_site_protection_honeypot_path();
-    $marker = 'v-' . substr(hash('sha256', $path), 0, 12);
-    echo '<script>document.cookie="mac_browser=1; path=/; max-age=2592000; SameSite=Lax";</script>';
-    echo '<style>.' . esc_attr($marker) . '{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}</style>';
-    echo '<a class="' . esc_attr($marker) . '" href="' . esc_url(home_url($path)) . '" rel="nofollow" aria-hidden="true" tabindex="-1">.</a>';
+    $fp = mac_site_protection_fingerprint();
+    $css = [
+        '.%s{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}',
+        '.%s{position:absolute!important;clip:rect(1px,1px,1px,1px);width:1px;height:1px;overflow:hidden}',
+        '.%s{position:fixed;top:-999px;left:-999px;opacity:0;pointer-events:none}',
+    ][(int) $fp['style'] % 3];
+    echo '<script>document.cookie="' . esc_js($fp['cookie']) . '=' . esc_js($fp['value']) . ';path=/;max-age=2592000;SameSite=Lax"</script>';
+    echo '<style>' . sprintf($css, esc_attr($fp['class'])) . '</style>';
+    echo '<a class="' . esc_attr($fp['class']) . '" href="' . esc_url(home_url(mac_site_protection_honeypot_path())) . '" rel="nofollow" aria-hidden="true" tabindex="-1">' . esc_html($fp['text']) . '</a>';
 }, 999);
 
 function mac_site_protection_browser_signal_score($ua) {
     $score = 0;
-    if (empty($_COOKIE['mac_browser'])) $score += 1;
+    if (empty($_COOKIE[mac_site_protection_fingerprint()['cookie']])) $score += 1;
     if (trim((string) ($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '')) === '') $score += 1;
     $accept = strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? ''));
     if (stripos($ua, 'mozilla/') !== false && $accept !== '' && strpos($accept, 'text/html') === false) $score += 1;
     return $score;
 }
 
-function mac_site_protection_increment_window($ip, $rule_key, $minutes, $max_hits) {
+function mac_site_protection_increment_window($ip, $rule_key, $minutes) {
     global $wpdb;
     $table = $wpdb->prefix . 'site_protection_rate_buckets';
     $bucket = gmdate('Y-m-d H:i:00');
@@ -875,23 +878,6 @@ function mac_site_protection_increment_daily_window($subject, $rule_key) {
     return (int) $wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(hits),0) FROM {$table} WHERE subject=%s AND rule_key=%s AND bucket_start >= %s", $subject, $rule_key, $cutoff));
 }
 
-function mac_site_protection_handle_daily_threshold($subject, $rule_key, $count, $limit, $ua, $mode) {
-    if ($mode !== 'enforce') {
-        $event_key = mac_site_protection_state_key('mac_sp_daily_monitor', $subject . '|' . $rule_key);
-        if (get_transient($event_key) === false) {
-            set_transient($event_key, '1', HOUR_IN_SECONDS);
-            mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'monitor', $ua);
-        }
-        return;
-    }
-    if (!mac_site_protection_block($subject, 'Daily request limit', DAY_IN_SECONDS / MINUTE_IN_SECONDS)) {
-        mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'error', $ua);
-        mac_site_protection_reject(60);
-    }
-    mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'block', $ua);
-    mac_site_protection_reject(DAY_IN_SECONDS);
-}
-
 function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, $ua) {
     global $wpdb;
     $wpdb->insert($wpdb->prefix . 'site_protection_events', [
@@ -903,77 +889,308 @@ function mac_site_protection_log_event($ip, $rule_key, $count, $limit, $action, 
 }
 
 /**
- * Counts different products opened by one subject during the past 24 hours.
- * Reloading the same product is not counted twice.
+ * Remembers when a subject opened its last pages and measures how even the
+ * gaps between them are. A person reads for three seconds, then for four
+ * minutes; a script waits about the same time every time, even with a random
+ * pause. A pause of 30 minutes starts a new series.
+ *
+ * @return array{0:bool,1:int} Robot verdict and the spread of the gaps, %.
  */
-function mac_site_protection_count_daily_products($subject, $product_key) {
+function mac_site_protection_rhythm_check($subject, $samples, $spread_limit) {
     global $wpdb;
-    $table = $wpdb->prefix . 'site_protection_rate_buckets';
-    $slot = intdiv(time(), 15 * MINUTE_IN_SECONDS) * 15 * MINUTE_IN_SECONDS;
-    $rule_key = 'pv_' . substr(md5((string) $product_key), 0, 16);
-    $inserted = $wpdb->query($wpdb->prepare("INSERT INTO {$table} (subject,rule_key,bucket_start,hits) VALUES (%s,%s,%s,1) ON DUPLICATE KEY UPDATE hits=hits+1", $subject, $rule_key, gmdate('Y-m-d H:i:00', $slot)));
-    if ($inserted === false) {
-        error_log('Site protection product counter failed: ' . $wpdb->last_error);
-        return 0;
-    }
-    return (int) $wpdb->get_var($wpdb->prepare("SELECT COUNT(DISTINCT rule_key) FROM {$table} WHERE subject=%s AND rule_key LIKE %s AND bucket_start >= %s", $subject, $wpdb->esc_like('pv_') . '%', gmdate('Y-m-d H:i:00', $slot - 95 * 15 * MINUTE_IN_SECONDS)));
+    $table = $wpdb->prefix . 'site_protection_rhythm';
+    $now = microtime(true);
+    $stored = (string) $wpdb->get_var($wpdb->prepare("SELECT stamps FROM {$table} WHERE subject=%s", $subject));
+    $stamps = $stored === '' ? [] : array_map('floatval', explode(',', $stored));
+    if ($stamps && $now - end($stamps) > 30 * MINUTE_IN_SECONDS) $stamps = [];
+    $stamps[] = $now;
+    $stamps = array_slice($stamps, -max(2, (int) $samples));
+    $wpdb->query($wpdb->prepare(
+        "INSERT INTO {$table} (subject,stamps,updated_at) VALUES (%s,%s,%s) ON DUPLICATE KEY UPDATE stamps=VALUES(stamps), updated_at=VALUES(updated_at)",
+        $subject,
+        implode(',', array_map(static function ($stamp) { return sprintf('%.3f', $stamp); }, $stamps)),
+        gmdate('Y-m-d H:i:s')
+    ));
+    if (count($stamps) < $samples) return [false, 0];
+
+    $gaps = [];
+    for ($i = 1, $n = count($stamps); $i < $n; $i++) $gaps[] = max(0.0, $stamps[$i] - $stamps[$i - 1]);
+    $mean = array_sum($gaps) / count($gaps);
+    // Many pages within the same moment are parallel downloads, not reading.
+    if ($mean < 0.2) return [true, 0];
+    $variance = 0.0;
+    foreach ($gaps as $gap) $variance += ($gap - $mean) ** 2;
+    $spread = (int) round(sqrt($variance / count($gaps)) / $mean * 100);
+    return [$spread < $spread_limit, $spread];
 }
+
+/** An HTML page a person opens: not the API, AJAX, assets or service files. */
+function mac_site_protection_is_page_request($path) {
+    if (preg_match('#^/(?:wp-admin|wp-login\.php|wp-cron\.php|xmlrpc\.php)(?:/|$)#i', $path)) return false;
+    if (preg_match('#^/wp-json(?:/|$)#i', $path) || isset($_GET['rest_route']) || isset($_GET['wc-ajax'])) return false;
+    return preg_match('/\.(?:css|js|map|jpe?g|png|gif|webp|avif|svg|ico|woff2?|ttf|eot|mp4|webm|pdf|zip|txt|xml|json)$/i', $path) !== 1;
+}
+
+const MAC_SITE_PROTECTION_PROFILE_OPTION = 'mac_site_protection_profile';
 
 /**
- * Too many different products in a day: 1 day, then 7 days, then 30 days.
- * Never permanent, because one mobile-carrier IPv4 is shared by many people.
+ * How this site answers a blocked visitor and what a limited visitor sees.
+ * The centre sends one profile per group of sites, so sites of different
+ * groups never share a block page.
  */
-function mac_site_protection_handle_product_threshold($subject, $count, $limit, $ua, $mode) {
-    if ($mode !== 'enforce') {
-        $event_key = mac_site_protection_state_key('mac_sp_product_monitor', $subject);
-        if (get_transient($event_key) === false) {
-            set_transient($event_key, '1', HOUR_IN_SECONDS);
-            mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'monitor', $ua);
-        }
-        return;
-    }
-    $level = mac_site_protection_register_incident($subject, 'product_daily');
-    $minutes = [1 => DAY_IN_SECONDS, 2 => 7 * DAY_IN_SECONDS][$level] ?? 30 * DAY_IN_SECONDS;
-    $minutes = (int) ($minutes / MINUTE_IN_SECONDS);
-    if (!mac_site_protection_block($subject, 'Product view limit, level ' . $level, $minutes)) {
-        mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'error', $ua);
-        mac_site_protection_reject(60);
-    }
-    mac_site_protection_log_event($subject, 'product_daily', $count, $limit, 'block', $ua);
-    mac_site_protection_reject($minutes * MINUTE_IN_SECONDS, 'Access temporarily restricted. Please try again later.');
+function mac_site_protection_profile_defaults() {
+    return [
+        'group' => '',
+        'layout' => 'card', 'status' => 429, 'retry_after' => '1',
+        'title' => 'Too many requests',
+        'text' => 'You have opened a lot of pages in a short time. Please try again later.',
+        'email' => '', 'accent' => '#2563eb', 'server_name' => 'nginx',
+        'vin_mode' => 'mask', 'vin_text' => 'Available in the full report', 'mask_char' => '•',
+        'photo_label' => 'Photo unavailable', 'photo_bg' => '#e5e7eb',
+    ];
 }
 
-function mac_site_protection_reject($retry_after, $message = 'Too many requests. Please try again later.', $status = 429) {
-    mac_sitemap_logs_begin_request();
-    mac_crawler_logs_begin_request();
+function mac_site_protection_clean_profile(array $raw) {
+    $p = wp_parse_args($raw, mac_site_protection_profile_defaults());
+    $d = mac_site_protection_profile_defaults();
+    return [
+        'group' => substr(sanitize_text_field((string) $p['group']), 0, 100),
+        'layout' => in_array($p['layout'], ['theme', 'card', 'minimal', 'server', 'plain'], true) ? $p['layout'] : $d['layout'],
+        'status' => in_array((int) $p['status'], [403, 429, 503], true) ? (int) $p['status'] : 429,
+        'retry_after' => empty($p['retry_after']) ? '0' : '1',
+        'title' => substr(sanitize_text_field((string) $p['title']), 0, 150),
+        'text' => substr(sanitize_textarea_field((string) $p['text']), 0, 1000),
+        'email' => sanitize_email((string) $p['email']),
+        'accent' => sanitize_hex_color((string) $p['accent']) ?: $d['accent'],
+        'server_name' => substr(sanitize_text_field((string) $p['server_name']), 0, 40),
+        'vin_mode' => $p['vin_mode'] === 'text' ? 'text' : 'mask',
+        'vin_text' => substr(sanitize_text_field((string) $p['vin_text']), 0, 100),
+        'mask_char' => mb_substr(sanitize_text_field((string) $p['mask_char']), 0, 1) ?: '•',
+        'photo_label' => substr(sanitize_text_field((string) $p['photo_label']), 0, 100),
+        'photo_bg' => sanitize_hex_color((string) $p['photo_bg']) ?: $d['photo_bg'],
+    ];
+}
+
+function mac_site_protection_profile() {
+    return mac_site_protection_clean_profile((array) get_option(MAC_SITE_PROTECTION_PROFILE_OPTION, []));
+}
+
+function mac_site_protection_profile_text($text, array $profile) {
+    return strtr((string) $text, ['{site_name}' => get_bloginfo('name'), '{home_url}' => home_url('/'), '{email}' => $profile['email']]);
+}
+
+function mac_site_protection_status_phrase($status) {
+    return [403 => 'Forbidden', 429 => 'Too Many Requests', 503 => 'Service Temporarily Unavailable'][(int) $status] ?? 'Too Many Requests';
+}
+
+function mac_site_protection_send_block_headers(array $profile, $retry_after) {
     nocache_headers();
-    status_header((int) $status);
-    header('Content-Type: text/plain; charset=utf-8');
-    header('Retry-After: ' . max(60, (int) $retry_after));
-    echo esc_html($message);
+    status_header((int) $profile['status']);
+    if ($profile['retry_after'] === '1') header('Retry-After: ' . max(60, (int) $retry_after));
+    header('X-Robots-Tag: noindex', true);
+}
+
+/** The whole answer for every layout except "theme", which needs the theme. */
+function mac_site_protection_block_document(array $profile) {
+    $title = mac_site_protection_profile_text($profile['title'], $profile);
+    $text = mac_site_protection_profile_text($profile['text'], $profile);
+    if ($profile['layout'] === 'plain') {
+        header('Content-Type: text/plain; charset=utf-8');
+        return trim($title . "\n\n" . $text) . "\n";
+    }
+    header('Content-Type: text/html; charset=utf-8');
+    if ($profile['layout'] === 'server') {
+        $line = (int) $profile['status'] . ' ' . mac_site_protection_status_phrase($profile['status']);
+        $signature = $profile['server_name'] !== '' ? "<hr><center>" . esc_html($profile['server_name']) . "</center>\r\n" : '';
+        return "<html>\r\n<head><title>{$line}</title></head>\r\n<body>\r\n<center><h1>{$line}</h1></center>\r\n{$signature}</body>\r\n</html>\r\n";
+    }
+
+    $site = get_bloginfo('name');
+    $logo_id = (int) get_theme_mod('custom_logo');
+    $logo = $logo_id ? (string) wp_get_attachment_image_url($logo_id, 'medium') : '';
+    $icon = (string) get_site_icon_url(64);
+    $accent = $profile['accent'];
+    $brand = $logo !== '' ? '<img src="' . esc_url($logo) . '" alt="' . esc_attr($site) . '">' : esc_html($site);
+    $head = '<!DOCTYPE html><html lang="' . esc_attr(get_bloginfo('language')) . '"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>' . esc_html($title . ' – ' . $site) . '</title>' . ($icon !== '' ? '<link rel="icon" href="' . esc_url($icon) . '">' : '');
+    $body = wpautop(esc_html($text));
+    if ($profile['layout'] === 'minimal') {
+        return $head . '<style>body{margin:0;font:16px/1.6 Georgia,"Times New Roman",serif;color:#222;background:#fff}header{padding:18px 24px;border-bottom:1px solid #e5e5e5}header a{color:' . $accent . ';text-decoration:none;font-weight:bold}header img{max-height:40px}section{max-width:640px;padding:48px 24px}h1{font-size:28px;font-weight:normal;margin:0 0 16px}</style></head>'
+            . '<body><header><a href="' . esc_url(home_url('/')) . '">' . $brand . '</a></header><section><h1>' . esc_html($title) . '</h1>' . $body . '</section></body></html>';
+    }
+    return $head . '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f6f7f9;color:#1f2933}main{max-width:520px;margin:24px;padding:40px 32px;background:#fff;border-radius:12px;box-shadow:0 2px 16px rgba(0,0,0,.06);border-top:4px solid ' . $accent . '}.brand{display:inline-block;margin-bottom:24px;color:' . $accent . ';font-weight:700;font-size:20px;text-decoration:none}.brand img{max-height:48px;max-width:200px}h1{margin:0 0 12px;font-size:24px}p{margin:0 0 12px;line-height:1.6}</style></head>'
+        . '<body><main><a class="brand" href="' . esc_url(home_url('/')) . '">' . $brand . '</a><h1>' . esc_html($title) . '</h1>' . $body . '</main></body></html>';
+}
+
+function mac_site_protection_can_render_in_theme($path) {
+    if (!mac_site_protection_is_page_request($path) || mac_site_protection_is_listing_feed($path)) return false;
+    return !function_exists('wp_is_block_theme') || !wp_is_block_theme();
+}
+
+function mac_site_protection_render_theme_block() {
+    $data = $GLOBALS['mac_sp_theme_block'] ?? null;
+    if (!is_array($data)) return;
+    $profile = $data['profile'];
+    $title = mac_site_protection_profile_text($profile['title'], $profile);
+    $text = mac_site_protection_profile_text($profile['text'], $profile);
+    $document_title = static function () use ($title) { return $title . ' – ' . get_bloginfo('name'); };
+    add_filter('pre_get_document_title', $document_title, 99);
+    add_filter('wpseo_title', $document_title, 99);
+    add_filter('wp_robots', 'wp_robots_no_robots');
+    add_filter('wpseo_robots', static function () { return 'noindex, nofollow'; }, 99);
+    mac_site_protection_send_block_headers($profile, $data['retry_after']);
+    header('Content-Type: text/html; charset=utf-8');
+    get_header();
+    echo '<div class="container"><article class="page type-page"><header class="entry-header"><h1 class="entry-title">' . esc_html($title) . '</h1></header><div class="entry-content">' . wpautop(esc_html($text)) . '</div></article></div>';
+    get_footer();
     exit;
 }
 
-function mac_site_protection_handle_threshold($ip, $rule_key, $count, $limit, $minutes, $ua, $mode) {
+/**
+ * Answers a refused request with the page of the site's group. The theme
+ * layout needs the theme, so a normal page is answered at template_redirect
+ * after an empty 404 query; other requests and layouts are answered at once.
+ * The caller must return right after this call.
+ */
+function mac_site_protection_deny($retry_after, $wp = null) {
+    mac_sitemap_logs_begin_request();
+    mac_crawler_logs_begin_request();
+    $profile = mac_site_protection_profile();
+    $path = (string) wp_parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+    if ($profile['layout'] === 'theme' && is_object($wp) && mac_site_protection_can_render_in_theme($path)) {
+        $GLOBALS['mac_sp_theme_block'] = ['profile' => $profile, 'retry_after' => $retry_after];
+        $wp->query_vars = ['error' => '404'];
+        add_action('template_redirect', 'mac_site_protection_render_theme_block', PHP_INT_MIN);
+        return;
+    }
+    if ($profile['layout'] === 'theme') $profile['layout'] = 'card';
+    mac_site_protection_send_block_headers($profile, $retry_after);
+    echo mac_site_protection_block_document($profile);
+    exit;
+}
+
+/**
+ * The limited product card: no photos and a masked VIN. The visitor sees an
+ * ordinary page, so a crawler does not learn that it has been limited.
+ */
+function mac_site_protection_start_limited_mode() {
+    if (!empty($GLOBALS['mac_sp_limited'])) return;
+    $GLOBALS['mac_sp_limited'] = true;
+    if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
+    add_filter('get_post_metadata', static function ($value, $object_id, $meta_key) {
+        if (!in_array($meta_key, ['_thumbnail_id', '_product_image_gallery'], true) || get_post_type($object_id) !== 'product') return $value;
+        return [''];
+    }, 99, 3);
+    add_filter('woocommerce_product_get_image_id', '__return_zero', 99);
+    add_filter('woocommerce_product_get_gallery_image_ids', '__return_empty_array', 99);
+    add_filter('woocommerce_placeholder_img_src', 'mac_site_protection_placeholder_image', 99);
+    add_action('send_headers', static function () { header('Cache-Control: private, no-store, max-age=0', true); });
+    add_action('template_redirect', static function () {
+        $GLOBALS['mac_sp_limited_patterns'] = mac_site_protection_product_image_patterns();
+        ob_start('mac_site_protection_limited_output');
+    }, PHP_INT_MAX);
+}
+
+/**
+ * Address patterns of the opened product's photos, in every size. A theme
+ * may print them without WooCommerce functions, so the page text is cleaned
+ * as well. Read from the database directly: the meta filters above hide them.
+ */
+function mac_site_protection_product_image_patterns() {
+    if (!is_singular('product')) return [];
+    global $wpdb;
+    $product_id = (int) get_queried_object_id();
+    $ids = [];
+    foreach ($wpdb->get_col($wpdb->prepare("SELECT meta_value FROM {$wpdb->postmeta} WHERE post_id=%d AND meta_key IN ('_thumbnail_id','_product_image_gallery')", $product_id)) as $value) {
+        foreach (explode(',', (string) $value) as $id) $ids[] = (int) $id;
+    }
+    $ids = array_merge($ids, array_map('intval', $wpdb->get_col($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_parent=%d AND post_type='attachment' LIMIT 100", $product_id))));
+    $patterns = [];
+    foreach (array_slice(array_unique(array_filter($ids)), 0, 100) as $id) {
+        $base = preg_replace('/(?:-scaled)?\.[a-z0-9]+$/i', '', (string) get_post_meta($id, '_wp_attached_file', true));
+        // A short bare name such as "1" would also match unrelated images.
+        if (strlen(basename($base)) < 4) continue;
+        $patterns[] = '#[^\s"\'(),]*' . preg_quote($base, '#') . '(?:-scaled)?(?:-\d+x\d+)?\.(?:jpe?g|png|gif|webp|avif)#i';
+    }
+    return $patterns;
+}
+
+function mac_site_protection_limited_output($html) {
+    if (!is_string($html) || $html === '') return $html;
+    $patterns = (array) ($GLOBALS['mac_sp_limited_patterns'] ?? []);
+    if ($patterns) $html = preg_replace($patterns, mac_site_protection_placeholder_image(), $html) ?? $html;
+    return mac_site_protection_mask_vins($html, mac_site_protection_profile());
+}
+
+/**
+ * Masks VINs in the page text. Lowercase VINs in addresses stay: the product
+ * address must keep working. A VIN has a digit and letters and no I, O or Q.
+ */
+function mac_site_protection_mask_vins($html, array $profile) {
+    $masked = preg_replace_callback('/(?<![A-Za-z0-9\/_.=%-])[A-HJ-NPR-Z0-9]{17}(?![A-Za-z0-9])/', static function ($match) use ($profile) {
+        $vin = $match[0];
+        if (!preg_match('/[0-9]/', $vin) || preg_match_all('/[A-Z]/', $vin) < 2) return $vin;
+        if ($profile['vin_mode'] === 'text') return esc_html($profile['vin_text']);
+        return substr($vin, 0, 3) . str_repeat($profile['mask_char'], 10) . substr($vin, -4);
+    }, $html);
+    return $masked ?? $html;
+}
+
+function mac_site_protection_placeholder_image() {
+    static $uri = null;
+    if ($uri !== null) return $uri;
+    $profile = mac_site_protection_profile();
+    $label = $profile['photo_label'] !== '' ? '<text x="400" y="300" font-family="Arial,sans-serif" font-size="28" fill="#6b7280" text-anchor="middle" dominant-baseline="middle">' . esc_html($profile['photo_label']) . '</text>' : '';
+    $svg = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600" viewBox="0 0 800 600"><rect width="800" height="600" fill="' . $profile['photo_bg'] . '"/>' . $label . '</svg>';
+    return $uri = 'data:image/svg+xml;charset=utf-8,' . rawurlencode($svg);
+}
+
+const MAC_SP_LIMITED_RECENT_OPTION = 'mac_site_protection_limited_recent';
+
+function mac_site_protection_remember_limited($subject, $rule_key) {
+    $list = (array) get_option(MAC_SP_LIMITED_RECENT_OPTION, []);
+    $list[$subject] = ['rule' => $rule_key, 'at' => current_time('mysql')];
+    $cutoff = wp_date('Y-m-d H:i:s', time() - DAY_IN_SECONDS);
+    $list = array_filter($list, static function ($row) use ($cutoff) { return (string) ($row['at'] ?? '') >= $cutoff; });
+    uasort($list, static function ($a, $b) { return strcmp((string) $b['at'], (string) $a['at']); });
+    update_option(MAC_SP_LIMITED_RECENT_OPTION, array_slice($list, 0, 200, true), false);
+}
+
+/** Shows the limited card; the event is reported once an hour per subject. */
+function mac_site_protection_limit($subject, $rule_key, $count, $limit, $ua, $mode) {
+    $event_key = mac_site_protection_state_key('mac_sp_limit_event', $subject . '|' . $rule_key);
+    if (get_transient($event_key) === false) {
+        set_transient($event_key, '1', HOUR_IN_SECONDS);
+        mac_site_protection_log_event($subject, $rule_key, $count, $limit, $mode === 'enforce' ? 'limit' : 'monitor', $ua);
+        if ($mode === 'enforce') mac_site_protection_remember_limited($subject, $rule_key);
+    }
+    if ($mode === 'enforce') mac_site_protection_start_limited_mode();
+}
+
+/**
+ * Blocks the subject for a rule. A repeated hourly-limit violation within
+ * 30 days gets the longer repeat term. The caller must return afterwards.
+ */
+function mac_site_protection_apply_block($subject, $rule_key, $count, $limit, $ua, $mode, $wp) {
     if ($mode !== 'enforce') {
-        $event_key = mac_site_protection_state_key('mac_sp_event', $ip . '|' . $rule_key);
+        $event_key = mac_site_protection_state_key('mac_sp_block_monitor', $subject . '|' . $rule_key);
         if (get_transient($event_key) === false) {
-            set_transient($event_key, '1', $minutes * MINUTE_IN_SECONDS);
-            mac_site_protection_log_event($ip, $rule_key, $count, $limit, 'monitor', $ua);
+            set_transient($event_key, '1', HOUR_IN_SECONDS);
+            mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'monitor', $ua);
         }
         return;
     }
-
-    $event_key = mac_site_protection_state_key('mac_sp_block_event', $ip . '|' . $rule_key);
-    if (get_transient($event_key) === false) {
-        set_transient($event_key, '1', $minutes * MINUTE_IN_SECONDS);
-        $level = mac_site_protection_register_incident($ip, $rule_key);
-        $block_minutes = mac_site_protection_escalation_minutes($level);
-        mac_site_protection_block($ip, 'Intensive access, level ' . $level, $block_minutes);
-        mac_site_protection_log_event($ip, $rule_key, $count, $limit, 'block', $ua);
-        mac_site_protection_reject($block_minutes === null ? DAY_IN_SECONDS : $block_minutes * MINUTE_IN_SECONDS, 'Too many requests. Please try again later.');
+    $s = mac_site_protection_settings();
+    $level = mac_site_protection_register_incident($subject, $rule_key);
+    $minutes = $rule_key === 'rhythm' ? (int) $s['rhythm_block_minutes'] : (int) ($level > 1 ? $s['repeat_block_minutes'] : $s['block_minutes']);
+    $reason = ['page_hour' => 'Hourly page limit', 'rhythm' => 'Robot rhythm', 'catalog_api_rate' => 'Catalog API limit'][$rule_key] ?? $rule_key;
+    if ($level > 1) $reason .= ', repeat';
+    if (!mac_site_protection_block($subject, $reason, max(1, $minutes))) {
+        mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'error', $ua);
+        mac_site_protection_deny(60, $wp);
+        return;
     }
-    mac_site_protection_reject(60, 'Too many requests. Please try again later.');
+    mac_site_protection_log_event($subject, $rule_key, $count, $limit, 'block', $ua);
+    mac_site_protection_deny(max(1, $minutes) * MINUTE_IN_SECONDS, $wp);
 }
 
 function mac_site_protection_enforce_v2($wp = null) {
@@ -983,7 +1200,7 @@ function mac_site_protection_enforce_v2($wp = null) {
 
     $ip = mac_site_protection_client_ip();
     $ua = (string) ($_SERVER['HTTP_USER_AGENT'] ?? '');
-    // Cache preload and loopback requests come from the site's own server.
+    // Loopback requests come from the site's own server.
     if ($ip === '' || mac_site_protection_is_own_server($ip) || mac_site_protection_whitelisted($ip, $ua)) return;
 
     // Do not run a database UPDATE on every request just to expire old rows.
@@ -994,7 +1211,8 @@ function mac_site_protection_enforce_v2($wp = null) {
     // An active block covers every address, including search, sitemaps and feeds.
     if (mac_site_protection_blocked($ip)) {
         mac_site_protection_record_block_hit($ip);
-        mac_site_protection_reject(3600, 'Access temporarily restricted. Please try again later.');
+        mac_site_protection_deny(HOUR_IN_SECONDS, $wp);
+        return;
     }
 
     $s = mac_site_protection_settings();
@@ -1004,13 +1222,12 @@ function mac_site_protection_enforce_v2($wp = null) {
     if ($class === 'official') return;
     $subject = mac_site_protection_subject($ip, $class);
 
-    if (untrailingslashit($path) === untrailingslashit(mac_site_protection_honeypot_path())) {
+    if (in_array(untrailingslashit($path), mac_site_protection_honeypot_paths(), true)) {
         $subject = mac_site_protection_subject($ip, 'honeypot');
         mac_site_protection_log_event($subject, 'honeypot', 1, 0, $mode === 'enforce' ? 'block' : 'monitor', $ua);
         if ($mode === 'enforce') {
-            $minutes = 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS;
-            mac_site_protection_block($subject, 'Service URL access', $minutes);
-            nocache_headers(); status_header(403); header('Content-Type: text/plain; charset=utf-8'); echo 'Access denied.'; exit;
+            mac_site_protection_block($subject, 'Service URL access', 7 * DAY_IN_SECONDS / MINUTE_IN_SECONDS);
+            mac_site_protection_deny(7 * DAY_IN_SECONDS, $wp);
         }
         return;
     }
@@ -1030,86 +1247,125 @@ function mac_site_protection_enforce_v2($wp = null) {
             mac_site_protection_block($subject, 'Sitemap or feed access', MAC_SP_SITEMAP_BLOCK_MINUTES);
             mac_site_protection_log_event($subject, 'sitemap_forbidden', 1, 0, 'block', $ua);
         }
-        mac_site_protection_reject(DAY_IN_SECONDS, 'Access denied.', 403);
-    }
-
-    if (mac_site_protection_is_search_page($path, $wp)) {
-        $daily_count = mac_site_protection_increment_daily_window($subject, 'search_daily');
-        if ($daily_count > MAC_SP_SEARCH_DAILY_LIMIT) mac_site_protection_handle_daily_threshold($subject, 'search_daily', $daily_count, MAC_SP_SEARCH_DAILY_LIMIT, $ua, $mode);
-        $minutes = max(1, (int) $s['rate_limit_minutes']);
-        $count = mac_site_protection_increment_window($subject, 'search_rate', $minutes, MAC_SP_SEARCH_WINDOW_LIMIT + 1);
-        if ($count > MAC_SP_SEARCH_WINDOW_LIMIT) mac_site_protection_handle_threshold($subject, 'search_rate', $count, MAC_SP_SEARCH_WINDOW_LIMIT, $minutes, $ua, $mode);
+        mac_site_protection_deny(DAY_IN_SECONDS, $wp);
         return;
     }
-
-    $daily_limit = max(MAC_SP_MIN_SITE_DAILY, (int) ($s['site_daily_limit'] ?? 200));
 
     if (mac_site_protection_is_store_products_collection($path)) {
         $requestedPageSize = isset($_GET['per_page']) ? (int) $_GET['per_page'] : 10;
         if ($requestedPageSize > 20) {
+            // The same answer WordPress gives for an out-of-range parameter.
             nocache_headers();
             status_header(400);
             header('Content-Type: application/json; charset=utf-8');
-            echo wp_json_encode(['code' => 'catalog_page_limit', 'message' => 'Maximum 20 products per page.']);
+            echo wp_json_encode(['code' => 'rest_invalid_param', 'message' => 'Invalid parameter(s): per_page', 'data' => ['status' => 400, 'params' => ['per_page' => 'per_page must be between 1 (inclusive) and 20 (inclusive)']]]);
             exit;
         }
-        $minutes = 10;
-        $limit = 12;
-        $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
-        if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $mode);
-        $count = mac_site_protection_increment_window($subject, 'catalog_api_rate', $minutes, $limit + 1);
-        if ($count > $limit) mac_site_protection_handle_threshold($subject, 'catalog_api_rate', $count, $limit, $minutes, $ua, $mode);
+        $count = mac_site_protection_increment_window($subject, 'catalog_api_rate', 10);
+        if ($count > 12) mac_site_protection_apply_block($subject, 'catalog_api_rate', $count, 12, $ua, $mode, $wp);
         return;
     }
 
-    if ($s['rate_limit_enabled'] !== '1' || !mac_site_protection_is_meaningful_request($path)) return;
+    if (!mac_site_protection_is_page_request($path)) return;
 
-    $product_key = mac_site_protection_product_key($path);
-    if ($product_key !== '') {
-        $product_limit = max(MAC_SP_MIN_PRODUCT_DAILY, (int) ($s['product_daily_limit'] ?? 10));
-        $products = mac_site_protection_count_daily_products($subject, $product_key);
-        if ($products > $product_limit) mac_site_protection_handle_product_threshold($subject, $products, $product_limit, $ua, $mode);
+    $hour = mac_site_protection_increment_window($subject, 'page_hour', 60);
+    $block_limit = (int) $s['block_hour_limit'];
+    if ($hour > $block_limit) {
+        mac_site_protection_apply_block($subject, 'page_hour', $hour, $block_limit, $ua, $mode, $wp);
+        return;
+    }
+    if ($s['rhythm_enabled'] === '1') {
+        [$robot, $spread] = mac_site_protection_rhythm_check($subject, (int) $s['rhythm_samples'], (int) $s['rhythm_spread']);
+        if ($robot) {
+            mac_site_protection_apply_block($subject, 'rhythm', $spread, (int) $s['rhythm_spread'], $ua, $mode, $wp);
+            return;
+        }
     }
 
-    $minutes = max(1, (int) $s['rate_limit_minutes']);
-    $limit = max(MAC_SP_MIN_SITE_RATE, (int) $s['rate_limit_count']);
-    if ($class === 'unverified_bot') $limit = max(MAC_SP_MIN_BOT_RATE, (int) ($s['unverified_bot_limit'] ?? $limit));
-    if ($class === 'seo') $limit = max(MAC_SP_MIN_BOT_RATE, (int) ($s['seo_bot_limit'] ?? $limit));
-    if ($class === 'suspicious_browser') $limit = min($limit, max(MAC_SP_MIN_BOT_RATE, (int) ($s['unverified_bot_limit'] ?? $limit)));
-    $rule_key = 'site_rate_auto';
-    $daily_count = mac_site_protection_increment_daily_window($subject, 'site_daily_auto');
-    if ($daily_count > $daily_limit) mac_site_protection_handle_daily_threshold($subject, 'site_daily_auto', $daily_count, $daily_limit, $ua, $mode);
-    $count = mac_site_protection_increment_window($subject, $rule_key, $minutes, $limit + 1);
-    if ($count <= $limit) return;
-    mac_site_protection_handle_threshold($subject, $rule_key, $count, $limit, $minutes, $ua, $mode);
+    $day = mac_site_protection_increment_daily_window($subject, 'page_day');
+    if ($hour > (int) $s['card_hour_limit']) {
+        mac_site_protection_limit($subject, 'card_hour', $hour, (int) $s['card_hour_limit'], $ua, $mode);
+    } elseif ($day > (int) $s['card_daily_limit']) {
+        mac_site_protection_limit($subject, 'card_daily', $day, (int) $s['card_daily_limit'], $ua, $mode);
+    } elseif ($class === 'unverified_bot' || $class === 'seo') {
+        mac_site_protection_limit($subject, 'bot_ua', $hour, 0, $ua, $mode);
+    } elseif ($class === 'suspicious_browser') {
+        mac_site_protection_limit($subject, 'no_browser', mac_site_protection_browser_signal_score($ua), 2, $ua, $mode);
+    }
 }
 add_action('parse_request', 'mac_site_protection_enforce_v2', -1);
 
+// Lets an administrator see the block page and the limited card of this site.
+add_action('parse_request', function ($wp) {
+    $preview = (string) ($_GET['mac_sp_preview'] ?? '');
+    if ($preview === '' || !current_user_can('manage_options')) return;
+    if ($preview === 'card') {
+        mac_site_protection_start_limited_mode();
+        return;
+    }
+    mac_site_protection_deny(HOUR_IN_SECONDS, $wp);
+}, -2);
+
+function mac_site_protection_minutes_label($minutes) {
+    $minutes = (int) $minutes;
+    if ($minutes % (DAY_IN_SECONDS / MINUTE_IN_SECONDS) === 0) return ($minutes / (DAY_IN_SECONDS / MINUTE_IN_SECONDS)) . ' дн.';
+    if ($minutes % 60 === 0) return ($minutes / 60) . ' ч';
+    return $minutes . ' мин';
+}
+
 function mac_site_protection_page_v2() {
     if (!current_user_can('manage_options')) return;
-    // Decisions and long-term history are intentionally centralised. A local
-    // site is only an enforcement agent, so it shows operational state instead
-    // of a second dashboard with its own controls and statistics.
+    // Rules, groups and history live in the centre. The site only shows what
+    // it currently enforces.
     global $wpdb;
     mac_site_protection_expire_blocks();
     $settings = mac_site_protection_settings();
+    $profile = mac_site_protection_profile();
     $blocks = $wpdb->get_results("SELECT ip_address, reason, created_at, expires_at, blocked_hits, last_blocked_at FROM {$wpdb->prefix}site_protection_blocks WHERE is_active=1 ORDER BY id DESC", ARRAY_A);
+    $limited = (array) get_option(MAC_SP_LIMITED_RECENT_OPTION, []);
     $config = mac_site_protection_central_config();
     $syncStatus = (array) get_option('mac_site_protection_central_last_sync', []);
     $syncStateLabels = [
-        'success' => 'Связь с центром установлена',
-        'not_configured' => 'Подключение не настроено',
-        'request_error' => 'Ошибка соединения с центром',
-        'http_error' => 'Центр вернул ошибку HTTP',
-        'invalid_response' => 'Некорректный ответ центра',
+        'success' => 'связь есть',
+        'not_configured' => 'подключение не настроено',
+        'request_error' => 'ошибка соединения',
+        'http_error' => 'центр вернул ошибку HTTP',
+        'invalid_response' => 'некорректный ответ центра',
     ];
+    $layoutLabels = ['theme' => 'в оформлении сайта', 'card' => 'карточка с логотипом', 'minimal' => 'простая страница', 'server' => 'как ошибка сервера', 'plain' => 'только текст'];
+    $limitLabels = ['card_hour' => 'страниц за час', 'card_daily' => 'страниц за сутки', 'bot_ua' => 'бот по User-Agent', 'no_browser' => 'не похож на браузер'];
+    $tab = ($_GET['tab'] ?? '') === 'limited' ? 'limited' : 'blocks';
+    $tabUrl = static function ($name) { return esc_url(admin_url('admin.php?page=mac-site-protection&tab=' . $name)); };
     ?>
     <div class="wrap mac-protection-content">
-        <div class="mac-section-title"><h1>Защита сайта</h1><p>Сайт работает как исполнитель: история и ручные решения находятся в центральном сайте; очередь проверяется примерно раз в минуту при работающем WP-Cron.</p></div>
-        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Подключение к центру</h2></div><p><?php echo $config['url'] !== '' && $config['api_key'] !== '' ? 'Подключено: ' . esc_html($config['url']) : 'Не настроено. Заполните адрес центра и API key в «Синхронизация с центром».'; ?></p><?php if ($syncStatus): ?><p><strong>Последняя синхронизация:</strong> <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><br><strong>Результат:</strong> <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'Неизвестно'); ?><?php if (!empty($syncStatus['http_code'])): ?> (HTTP <?php echo (int) $syncStatus['http_code']; ?>)<?php endif; ?><?php if (!empty($syncStatus['received_commands'])): ?><br><strong>Команды от центра:</strong> <?php echo esc_html(implode(', ', array_map('intval', (array) $syncStatus['received_commands']))); ?><?php endif; ?><?php if (!empty($syncStatus['command_results'])): ?><br><strong>Применение:</strong> <?php foreach ((array) $syncStatus['command_results'] as $result): ?><?php echo esc_html('#' . (int) ($result['id'] ?? 0) . ': ' . (!empty($result['ok']) ? 'успешно' : 'ошибка') . (!empty($result['message']) ? ' — ' . (string) $result['message'] : '') . ' '); ?><?php endforeach; ?><?php endif; ?><?php if (!empty($syncStatus['ack_state']) && $syncStatus['ack_state'] !== 'not_required'): ?><br><strong>Подтверждение центру:</strong> <?php echo esc_html($syncStatus['ack_state'] === 'confirmed' ? 'отправлено' : (string) $syncStatus['ack_state']); ?><?php endif; ?><?php if (!empty($syncStatus['error'])): ?><br><strong>Ошибка:</strong> <?php echo esc_html((string) $syncStatus['error']); ?><?php endif; ?></p><?php endif; ?><form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form></section>
-        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>WhiteList IP</h2></div><p><?php echo $settings['ip_whitelist'] !== '' ? nl2br(esc_html($settings['ip_whitelist'])) : 'Пусто'; ?></p></section>
-        <section class="mac-protection-panel"><div class="mac-panel-head"><h2>Активные блокировки</h2></div><table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th><th>Отклонено</th><th>Последняя попытка</th></tr></thead><tbody><?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo number_format_i18n((int) ($block['blocked_hits'] ?? 0)); ?></td><td><?php echo esc_html($block['last_blocked_at'] ?: '—'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Активных блокировок нет.</td></tr><?php endif; ?></tbody></table></section>
-        <section class="mac-protection-panel mac-protection-guide"><div class="mac-panel-head"><h2>Как работает защита</h2></div><p>Сайт исполняет правила из центра и сам не создаёт постоянных ручных решений. При блокировке он отвечает <code>429 Too Many Requests</code>; счётчики в таблице показывают только новые отклонённые запросы после установки этой версии.</p><h3>Причины блокировок</h3><ul><li><strong>Массовая блокировка по отчёту защиты</strong>, <strong>Ручное решение из центра</strong> или <strong>Автоблок с другого сайта сети</strong> — решение пришло из центрального сайта. Срок указан в столбце «До».</li><li><strong>Intensive access</strong> — превышен лимит страниц за окно. Повторные превышения усиливают блокировку: 10 минут → 1 час → 1 день → 1 месяц → навсегда.</li><li><strong>Daily request limit</strong> — превышен суточный лимит страниц или поиска; блокировка на 24 часа.</li><li><strong>Product view limit</strong> — за сутки открыто больше разных товаров, чем разрешено в центре. Блокировка 1 день → 7 дней → 30 дней, навсегда — никогда (один мобильный IP бывает общим у многих людей).</li><li><strong>Sitemap or feed access</strong> — запрос XML-карты сайта или RSS не от проверенного Google, Bing, Яндекса или Apple. Посетители их не открывают; блокировка на 30 дней.</li><li><strong>Service URL access</strong> — запрос к скрытой ссылке-ловушке, запрещённой в robots.txt; блокировка на 7 дней.</li></ul><h3>Схема работы</h3><ol><li>Сначала проверяются WhiteList, запросы самого сервера (preload кэша) и активные блокировки — блокировка действует на все адреса, включая поиск.</li><li>Официальные Google (включая AdsBot, Merchant Center и Search Console), Bing, Яндекс и Apple не ограничиваются после проверки по DNS.</li><li>Карты сайта и RSS отдаются только им; остальным — 403.</li><li>Поиск по сайту ограничен отдельно: <?php echo (int) MAC_SP_SEARCH_WINDOW_LIMIT; ?> за окно и <?php echo (int) MAC_SP_SEARCH_DAILY_LIMIT; ?> за сутки. Параметр <code>?s=</code> на других адресах защиту не отключает.</li><li>REST API WordPress со списками товаров (<code>/wp-json/wp/v2/*</code>, <code>/wp-json/wc/store/*/products</code>) закрыт для гостей; корзина, оформление заказа, вебхуки оплат и API центра работают как прежде.</li><li>Остальные запросы проходят лимиты страниц и товаров; срабатывания отправляются в центр, а центр распространяет автоблоки на все сайты сети.</li></ol></section>
+        <div class="mac-section-title"><h1>Защита сайта</h1><p>Правила, группы и история находятся в центре. Сайт применяет их и проверяет команды примерно раз в минуту.</p></div>
+        <section class="mac-protection-panel">
+            <p><strong>Центр:</strong> <?php echo $config['url'] !== '' && $config['api_key'] !== '' ? esc_html($config['url']) : 'не настроен — заполните адрес и API key в «Синхронизация с центром»'; ?>
+            <?php if ($syncStatus): ?> · <?php echo esc_html($syncStateLabels[(string) ($syncStatus['state'] ?? '')] ?? 'неизвестно'); ?>, последний обмен <?php echo esc_html((string) ($syncStatus['attempted_at'] ?? '—')); ?><?php endif; ?></p>
+            <?php if (!empty($syncStatus['error'])): ?><p><strong>Ошибка:</strong> <?php echo esc_html((string) $syncStatus['error']); ?></p><?php endif; ?>
+            <p><strong>Группа:</strong> <?php echo esc_html($profile['group'] !== '' ? $profile['group'] : 'ещё не получена от центра'); ?> · <strong>Режим:</strong> <?php echo $settings['protection_mode'] === 'enforce' ? 'работает' : 'наблюдение (только отметки)'; ?></p>
+            <p><strong>Сейчас действует:</strong> урезанная карточка с <?php echo (int) $settings['card_hour_limit']; ?> страниц за час или <?php echo (int) $settings['card_daily_limit']; ?> за сутки · блок с <?php echo (int) $settings['block_hour_limit']; ?> страниц за час на <?php echo esc_html(mac_site_protection_minutes_label($settings['block_minutes'])); ?>, повторно на <?php echo esc_html(mac_site_protection_minutes_label($settings['repeat_block_minutes'])); ?> · ритм робота: <?php echo $settings['rhythm_enabled'] === '1' ? 'разброс меньше ' . (int) $settings['rhythm_spread'] . '% на ' . (int) $settings['rhythm_samples'] . ' страницах → блок на ' . esc_html(mac_site_protection_minutes_label($settings['rhythm_block_minutes'])) : 'выключен'; ?></p>
+            <p><strong>Страница блокировки:</strong> <?php echo esc_html($layoutLabels[$profile['layout']] ?? $profile['layout']); ?>, код <?php echo (int) $profile['status']; ?> ·
+                <a href="<?php echo esc_url(add_query_arg('mac_sp_preview', '1', home_url('/'))); ?>" target="_blank" rel="noopener">посмотреть страницу блокировки</a> ·
+                <a href="<?php echo esc_url(add_query_arg('mac_sp_preview', 'card', home_url('/'))); ?>" target="_blank" rel="noopener">посмотреть урезанную карточку</a> <span class="description">(откройте любой товар и добавьте к адресу <code>?mac_sp_preview=card</code>)</span></p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"><?php wp_nonce_field('mac_site_protection_sync_now'); ?><input type="hidden" name="action" value="mac_site_protection_sync_now"><button type="submit" class="button">Проверить команды сейчас</button></form>
+        </section>
+        <h2 class="nav-tab-wrapper">
+            <a class="nav-tab <?php echo $tab === 'blocks' ? 'nav-tab-active' : ''; ?>" href="<?php echo $tabUrl('blocks'); ?>">Блокировки (<?php echo count($blocks); ?>)</a>
+            <a class="nav-tab <?php echo $tab === 'limited' ? 'nav-tab-active' : ''; ?>" href="<?php echo $tabUrl('limited'); ?>">Урезанная карточка за сутки (<?php echo count($limited); ?>)</a>
+        </h2>
+        <section class="mac-protection-panel">
+        <?php if ($tab === 'blocks'): ?>
+            <table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Создана</th><th>До</th><th>Отклонено</th><th>Последняя попытка</th></tr></thead><tbody>
+            <?php if ($blocks): foreach ($blocks as $block): ?><tr><td><?php echo esc_html($block['ip_address']); ?></td><td><?php echo esc_html($block['reason']); ?></td><td><?php echo esc_html($block['created_at']); ?></td><td><?php echo esc_html($block['expires_at'] ?: 'Навсегда'); ?></td><td><?php echo number_format_i18n((int) ($block['blocked_hits'] ?? 0)); ?></td><td><?php echo esc_html($block['last_blocked_at'] ?: '—'); ?></td></tr><?php endforeach; else: ?><tr><td colspan="6">Активных блокировок нет.</td></tr><?php endif; ?>
+            </tbody></table>
+        <?php else: ?>
+            <table class="widefat striped"><thead><tr><th>IP / сеть</th><th>Причина</th><th>Последний раз</th></tr></thead><tbody>
+            <?php if ($limited): foreach ($limited as $subject => $row): ?><tr><td><?php echo esc_html((string) $subject); ?></td><td><?php echo esc_html($limitLabels[(string) ($row['rule'] ?? '')] ?? (string) ($row['rule'] ?? '')); ?></td><td><?php echo esc_html((string) ($row['at'] ?? '')); ?></td></tr><?php endforeach; else: ?><tr><td colspan="3">За сутки никто не получал урезанную карточку.</td></tr><?php endif; ?>
+            </tbody></table>
+        <?php endif; ?>
+        </section>
+        <section class="mac-protection-panel"><p><strong>WhiteList IP:</strong> <?php echo $settings['ip_whitelist'] !== '' ? esc_html(implode(', ', preg_split('/\r\n|\r|\n/', (string) $settings['ip_whitelist']))) : 'пусто'; ?></p></section>
     </div>
     <?php
 }
