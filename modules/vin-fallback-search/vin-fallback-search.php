@@ -1454,6 +1454,9 @@ class VINFallbackSearch
         }
 
         $providers = apply_filters('vin_fallback_providers', []);
+        // first_found=1 stops at the first provider that knows the VIN, so the
+        // other providers' request limits are not spent.
+        $first_found = !empty($request->get_param('first_found'));
         $out = [
             'vin' => $vin,
             'providers_count' => count($providers),
@@ -1477,6 +1480,9 @@ class VINFallbackSearch
                     'generated_slug' => $item ? $this->build_product_slug($item, $generated_title, $item['sku'] ?? $vin, $provider_class) : null,
                     'item' => $item,
                 ];
+                if ($first_found && $item) {
+                    break;
+                }
             } catch (\Throwable $e) {
                 $out['providers'][] = [
                     'class' => $provider_class,
